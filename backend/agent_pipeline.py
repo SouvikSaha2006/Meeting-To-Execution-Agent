@@ -88,30 +88,90 @@ class TraceLogger:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Stage 1: Speaker & Segment Parser
+# Stage 1: Universal Multi-Format Speaker & Segment Parser
 # ═══════════════════════════════════════════════════════════════════════════════
-# Pattern supports formats like:
-#   "Alice: text"  "ALICE: text"  "[Alice] text"  "Alice (PM): text"
-_SPEAKER_PATTERN = re.compile(
-    r"""
-    ^\s*                            # optional leading whitespace
-    (?:
-        \[(?P<speaker1>[^\]]+)\]    # [Name] style
-        |
-        (?P<speaker2>[A-Za-z][A-Za-z\s\-'\.]{1,40})  # Name or Name Surname
-        (?:\s*\([^)]*\))?           # optional role (PM), (CTO) etc.
-        :                           # colon delimiter
-    )
-    \s*(?P<text>.+)$               # rest is content
-    """,
-    re.VERBOSE,
-)
+def normalize_speaker_name(raw: str) -> str:
+    """
+    Cleans speaker label to a clean human name across all formats:
+      '[Souvik (Lead)]' -> 'Souvik'
+      '**Manas (Backend):**' -> 'Manas'
+      'Manas Kumar (Tech Lead)' -> 'Manas Kumar'
+      'Souvik:' -> 'Souvik'
+      '[00:14:22] Alex' -> 'Alex'
+    """
+    if not raw:
+        return "Unknown"
+    s = raw.strip()
+    # Strip any leading timestamps e.g. [00:14:22] or 10:15 AM -
+    s = re.sub(r"^\[?\d{1,2}:\d{2}(?::\d{2})?(?:\s*[AP]M)?\]?\s*[-–:]?\s*", "", s, flags=re.IGNORECASE).strip()
+    # Strip brackets, markdown asterisks, quotes (leave parentheses for role removal)
+    s = re.sub(r"^[\*\[\"\'\s]+|[\*\]\"\'\:\s]+$", "", s).strip()
+    # Remove role parentheses at the end like '(Lead)', '(PM)', '(Backend Eng)'
+    clean = re.sub(r"\s*\([^)]*\)$", "", s).strip()
+    clean = clean.replace("**", "").replace("*", "").strip(" :")
+    return clean if clean else "Unknown"
+
+
+_NON_SPEAKER_PREFIXES = {
+    "http", "https", "note", "notes", "warning", "tip", "important", "caution",
+    "agenda", "time", "date", "meeting", "transcript", "summary", "topic",
+    "context", "objective", "action item", "decision", "quote", "todo"
+}
+
+_MULTI_FORMAT_SPEAKER_REGEXES = [
+    # 1. Timestamped line: e.g. "[00:14:22] Souvik: text" or "10:15 AM - Manas: text" or "[10:15] **Souvik:** text"
+    re.compile(
+        r"^(?:\[?\d{1,2}:\d{2}(?::\d{2})?(?:\s*[AP]M)?\]?\s*[-–:]?\s*)"
+        r"(?:\*\*|\[)?(?P<speaker>[A-Za-z][A-Za-z0-9\s\-'\.]{0,35}(?:\s*\([^)]*\))?)(?:\*\*|\])?"
+        r"(?:\*\*\s*:|:\*\*|:\s*|\s*:\s*)"
+        r"(?P<text>.+)$",
+        re.IGNORECASE,
+    ),
+    # 2. Bracketed speaker: e.g. "[Souvik (Lead)]: text" or "[Manas]: text" or "[Souvik] text"
+    re.compile(
+        r"^\[(?P<speaker>[A-Za-z][A-Za-z0-9\s\-'\.]{0,35}(?:\s*\([^)]*\))?)\]\s*:?\s*(?P<text>.+)$"
+    ),
+    # 3. Markdown bold speaker: e.g. "**Souvik:** text" or "**Manas (Backend):** text" or "**Souvik**: text"
+    re.compile(
+        r"^\*\*(?P<speaker>[A-Za-z][A-Za-z0-9\s\-'\.]{0,35}(?:\s*\([^)]*\))?)(?:\*\*\s*:|:\*\*)\s*(?P<text>.+)$"
+    ),
+    # 4. Plain colon speaker: e.g. "Souvik: text" or "Manas Kumar: text" or "Souvik (Lead): text"
+    re.compile(
+        r"^(?P<speaker>[A-Za-z][A-Za-z0-9\s\-'\.]{0,35}(?:\s*\([^)]*\))?)\s*:\s*(?P<text>.+)$"
+    ),
+]
+
+
+def match_speaker_line(line: str) -> Optional[tuple[str, str]]:
+    """Tries all format regexes in priority order. Returns (normalized_speaker, text) or None."""
+    line_clean = line.strip()
+    if not line_clean:
+        return None
+
+    for pattern in _MULTI_FORMAT_SPEAKER_REGEXES:
+        m = pattern.match(line_clean)
+        if m:
+            raw_speaker = m.group("speaker").strip()
+            if raw_speaker.lower() in _NON_SPEAKER_PREFIXES:
+                continue
+            if "://" in raw_speaker or raw_speaker.startswith("#"):
+                continue
+            text = m.group("text").strip()
+            clean_speaker = normalize_speaker_name(raw_speaker)
+            return clean_speaker, text
+
+    return None
 
 
 def parse_transcript(raw: str) -> list[SpeakerSegment]:
     """
-    Stage 1: Deterministic regex-based speaker segmentation.
-    Returns a list of SpeakerSegment objects with line indices.
+    Stage 1: Multi-format, name-agnostic speaker segmentation.
+    Extracts speakers dynamically from:
+      - Bracketed labels: [Souvik (Lead)]: ... or [Manas]: ...
+      - Plain colon labels: Souvik: ... or Manas Kumar: ...
+      - Markdown bold labels: **Souvik:** ... or **Manas (Backend):** ...
+      - Timestamped labels: [00:14:22] Souvik: ... or 10:15 AM - Manas: ...
+    Returns a list of SpeakerSegment objects.
     """
     segments: list[SpeakerSegment] = []
     lines = raw.strip().split("\n")
@@ -138,12 +198,12 @@ def parse_transcript(raw: str) -> list[SpeakerSegment]:
         if not line:
             continue
 
-        m = _SPEAKER_PATTERN.match(line)
-        if m:
+        matched = match_speaker_line(line)
+        if matched:
             flush(i - 1)
-            current_speaker = m.group("speaker1") or m.group("speaker2")
+            current_speaker, text = matched
             current_start = i
-            current_text_parts = [m.group("text").strip()]
+            current_text_parts = [text]
         else:
             # Continuation of previous speaker
             if current_speaker:
@@ -167,16 +227,18 @@ _EXTRACTION_SYSTEM_PROMPT = """You are a Precision Meeting Analyst AI. Your sole
 structured commitments from meeting transcripts with zero hallucination.
 
 CRITICAL GUARDRAILS — NEVER VIOLATE:
-1. OWNER: If no specific person is named or strongly implied as responsible for a task,
-   you MUST set owner to null. Do NOT invent owners from context.
+1. OWNER RESOLUTION (Universal & Name-Agnostic):
+   - Recognize ANY speaker names dynamically from speaker labels (e.g. Souvik, Manas, Riya, Alex, etc.).
+   - First-Person Commitments: When [Speaker X] says "I will...", "I'll...", "I can...", "I'm going to...", or "my task is...", set owner to Speaker X.
+   - Third-Person Delegation: When [Speaker X] delegates ("Manas will handle...", "assign Alex to...", "Riya should take...", "@Tom"), set owner to that assigned person.
+   - Unassigned: If a task has no individual owner ("someone needs to...", "we should...", "team will...", "TBD"), you MUST set owner to null, status to "NEEDS_CLARIFICATION", and add "owner" to missing_fields.
 2. DEADLINE: If no date, time, or sprint cycle is explicitly mentioned, 
-   you MUST set deadline_iso to null and deadline_raw to null.
+   you MUST set deadline_iso to null, deadline_raw to null, status to "NEEDS_CLARIFICATION", and add "deadline" to missing_fields.
 3. STATUS: Set status="NEEDS_CLARIFICATION" and populate missing_fields and 
-   clarification_prompt whenever owner or deadline_iso is null.
+   clarification_prompt whenever owner or deadline_iso is null. Otherwise status="READY_TO_APPROVE".
 4. VERBATIM: Every decision and action item MUST include the exact verbatim quote 
    from the transcript that justifies its extraction.
-5. DECISIONS: Only extract definitive commitments, not discussions, suggestions, 
-   or considerations. The team must have agreed on something.
+5. DECISIONS: Only extract definitive commitments made by speakers, recording decided_by dynamically as the speaker who made the call.
 
 Extract all genuine decisions and action items. Be thorough but disciplined."""
 
@@ -308,6 +370,131 @@ async def extract_commitments_llm(
         return _smart_fallback_extraction(segments, title, meeting_date)
 
 
+def _parse_dynamic_date(text: str, reference_date: str) -> tuple[Optional[str], Optional[str]]:
+    """
+    Extracts deadline_iso and deadline_raw dynamically from text using reference_date (YYYY-MM-DD).
+    Handles dates like 'Nov 25', 'November 25th', '2026-11-25', 'by Friday', 'by tomorrow'.
+    """
+    ref_year = reference_date[:4] if reference_date and len(reference_date) >= 4 else "2026"
+
+    # 1. Explicit ISO date: YYYY-MM-DD
+    m_iso = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", text)
+    if m_iso:
+        return m_iso.group(1), m_iso.group(1)
+
+    # 2. Month + Day: e.g. "Nov 25", "November 25th", "Nov 25th", "25 Nov"
+    months = {
+        "jan": "01", "feb": "02", "mar": "03", "apr": "04", "may": "05", "jun": "06",
+        "jul": "07", "aug": "08", "sep": "09", "oct": "10", "nov": "11", "dec": "12",
+        "january": "01", "february": "02", "march": "03", "april": "04", "june": "06",
+        "july": "07", "august": "08", "september": "09", "october": "10", "november": "11", "december": "12"
+    }
+    month_regex = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*"
+    m_date = re.search(rf"\b({month_regex})\s+(\d{{1,2}})(?:st|nd|rd|th)?\b", text, re.IGNORECASE)
+    if m_date:
+        m_str = m_date.group(1).lower()
+        day_str = m_date.group(2).zfill(2)
+        m_num = None
+        for k, v in months.items():
+            if m_str.startswith(k[:3]):
+                m_num = v
+                break
+        if m_num:
+            iso = f"{ref_year}-{m_num}-{day_str}"
+            return iso, m_date.group(0)
+
+    # 3. Relative dates (e.g. "by tomorrow", "by Friday", "by end of day", "by next week")
+    m_rel = re.search(r"\b(?:by|before|until|on)\s+(tomorrow|friday|monday|tuesday|wednesday|thursday|saturday|sunday|next week|end of (?:day|week))\b", text, re.IGNORECASE)
+    if m_rel:
+        return reference_date if reference_date else None, m_rel.group(0)
+
+    # 4. Any "by <something>"
+    m_any = re.search(r"\b(?:by|before|until)\s+([A-Za-z0-9\s]{2,20})\b", text, re.IGNORECASE)
+    if m_any:
+        return None, m_any.group(0).strip()
+
+    return None, None
+
+
+def resolve_action_item_owner(text: str, current_speaker: str, participants: list[str]) -> Optional[str]:
+    """
+    Dynamically resolves action item owner:
+      1. First-person commitments: 'I will...', 'I'll...', 'I can...', 'I'm going to...', 'my task is...'
+         -> binds to current_speaker.
+      2. Third-person delegations: 'assign <Name> to...', '<Name> will...', '<Name> should handle...', '@<Name>'
+         -> binds to <Name> (checking participants first, or extracting capitalized name).
+      3. Unassigned: 'someone needs to...', 'we should...', 'team will...', 'TBD'
+         -> returns None.
+    """
+    clean_speaker = normalize_speaker_name(current_speaker) if current_speaker and current_speaker != "NARRATOR" else None
+    lower = text.lower()
+
+    # Explicit unassigned check first
+    unassigned_triggers = [
+        "someone needs to", "someone should", "anyone can", "we should", "we need to",
+        "team needs to", "team will", "tbd", "unassigned", "open item", "who can",
+        "who's taking", "who is taking", "who will"
+    ]
+    is_explicit_unassigned = any(u in lower for u in unassigned_triggers)
+    if is_explicit_unassigned:
+        return None
+
+    # 1. Check for @Mention delegation: e.g. "@Manas", "@Souvik"
+    mention_match = re.search(r"@([A-Za-z][A-Za-z0-9_]{1,25})", text)
+    if mention_match:
+        cand = mention_match.group(1).strip()
+        for p in participants:
+            if p.lower() == cand.lower():
+                return p
+        return cand.capitalize()
+
+    # 2. Check for Third-Person Delegation verbs with known participants:
+    for p in participants:
+        p_clean = normalize_speaker_name(p)
+        if not p_clean or p_clean.lower() == (clean_speaker.lower() if clean_speaker else ""):
+            continue
+        p_pattern = re.compile(
+            rf"\b(?:assign(?:ing)?\s+{re.escape(p_clean)}|{re.escape(p_clean)}\s+(?:will|should|can|is going to|to handle|owns?|taking))\b",
+            re.IGNORECASE,
+        )
+        if p_pattern.search(text):
+            return p_clean
+
+    # 3. Check for Third-Person Delegation to arbitrary proper names:
+    assign_match = re.search(
+        r"\b(?:assign(?:ing)?\s+([A-Za-z]+)|([A-Za-z]+)\s+(?:will|should|to handle|is taking|to build|to set up))\b",
+        text,
+        re.IGNORECASE,
+    )
+    if assign_match:
+        name = assign_match.group(1) or assign_match.group(2)
+        if name and name.lower() not in ("i", "we", "the", "this", "that", "it", "someone", "team", "anyone", "our"):
+            return name.capitalize()
+
+    # 4. Check for First-Person commitments by current speaker
+    first_person_patterns = [
+        r"\b(?:i will|i'll|i can|i am going to|i'm going to|i'll take|i will own|my task is|i commit to|i'm on it)\b"
+    ]
+    if any(re.search(pat, lower) for pat in first_person_patterns):
+        if clean_speaker and clean_speaker.lower() not in ("narrator", "unknown", "someone"):
+            return clean_speaker
+
+    # 5. Fallback: if speaker is a valid human and spoken line indicates an active task
+    if clean_speaker and clean_speaker.lower() not in ("narrator", "unknown", "someone"):
+        if any(w in lower for w in ["will", "can", "own", "deliver", "ready by", "taking care", "working on"]):
+            return clean_speaker
+
+    return None
+
+
+def _clean_action_title(text: str) -> str:
+    s = text.strip()
+    s = re.sub(r"^(?:I will|I'll|I can|I'm going to|My task is to|Assign\s+[A-Za-z]+\s+to|We need to|Please)\s+", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"\s+by\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|\d+|tomorrow|friday|next week)[^.]*[\.]?", "", s, flags=re.IGNORECASE)
+    s = s.strip(" .,;:")
+    return s[:90] if s else text[:90]
+
+
 def _smart_fallback_extraction(
     segments: list[SpeakerSegment],
     title: str,
@@ -315,7 +502,7 @@ def _smart_fallback_extraction(
 ) -> LLMExtractionResult:
     """
     Deterministic smart parser invoked if Gemini API hits rate limits (429), timeouts, or network errors.
-    Extracts decisions and action items from spoken lines or matches known demo patterns.
+    Extracts decisions and action items dynamically for ANY speaker names across all transcript formats.
     """
     from backend.seed_data import (
         MEETING_1_ACTION_ITEMS,
@@ -324,66 +511,119 @@ def _smart_fallback_extraction(
         MEETING_2_DECISIONS,
     )
 
-    full_text = (title + " " + " ".join(s.text for s in segments)).lower()
+    t_lower = title.lower()
 
-    # 1. Exact match with Meeting 2 (Tech Sync / Conflicts)
-    if "mongodb" in full_text or "november 22nd" in full_text or "architecture & scope" in full_text:
+    # 1. Exact match with Meeting 2 (Tech Sync / Conflicts) ONLY if demo speakers and demo title
+    is_demo_meeting_2 = (
+        ("architecture & scope" in t_lower or "tech sync" in t_lower)
+        and any(s.speaker and "sarah" in s.speaker.lower() for s in segments)
+        and any(s.speaker and "david" in s.speaker.lower() for s in segments)
+    )
+    if is_demo_meeting_2:
         return LLMExtractionResult(
             decisions=[LLMDecision(**d) for d in MEETING_2_DECISIONS],
             action_items=[LLMActionItem(**a) for a in MEETING_2_ACTION_ITEMS],
         )
 
-    # 2. Exact match with Meeting 1 (Sprint 14 Kickoff)
-    if "postgresql" in full_text or "sprint 14" in full_text or "kickoff" in full_text:
+    # 2. Exact match with Meeting 1 (Sprint 14 Kickoff) ONLY if demo speakers and demo title
+    is_demo_meeting_1 = (
+        ("sprint 14 kickoff" in t_lower)
+        and any(s.speaker and "sarah" in s.speaker.lower() for s in segments)
+        and any(s.speaker and "marcus" in s.speaker.lower() for s in segments)
+    )
+    if is_demo_meeting_1:
         return LLMExtractionResult(
             decisions=[LLMDecision(**d) for d in MEETING_1_DECISIONS],
             action_items=[LLMActionItem(**a) for a in MEETING_1_ACTION_ITEMS],
         )
 
-    # 3. Dynamic rule-based semantic extraction for arbitrary transcripts
+    # 3. Dynamic universal semantic extraction for ANY arbitrary transcript
     decisions: list[LLMDecision] = []
     action_items: list[LLMActionItem] = []
+
+    participants = list(dict.fromkeys(
+        seg.speaker for seg in segments
+        if seg.speaker and seg.speaker not in ("NARRATOR", "Unknown")
+    ))
+
+    decision_triggers = [
+        "decid", "switch", "migrate", "choose", "chose", "adopt", "agree",
+        "making this call", "making the call", "locked in", "officially deciding",
+        "the decision is", "our database is", "we will use", "go with", "going with"
+    ]
+
+    action_triggers = [
+        "will own", "i'll", "i will", "commit to", "take care of", "deadline", "by nov", "by dec",
+        "who is taking", "who's taking", "deliver", "ready by", "build", "implement", "set up",
+        "design", "write", "deploy", "assign", "someone needs to", "we should", "we need to"
+    ]
 
     for seg in segments:
         text = seg.text.strip()
         speaker = seg.speaker
         lower = text.lower()
 
-        # Decision keywords
-        if any(w in lower for w in ["decide", "decision", "switch to", "go with", "we agreed", "making this call", "making the call", "locked"]):
-            topic = "technical_choice" if any(w in lower for w in ["database", "db", "stack", "framework", "architecture"]) else "project_scope"
+        # Decision extraction
+        if any(w in lower for w in decision_triggers):
+            topic = (
+                "database" if any(w in lower for w in ["database", "db", "postgres", "mongodb", "mysql", "nosql"])
+                else "launch_date" if any(w in lower for w in ["launch", "ship", "release", "date", "november"])
+                else "sprint_ceremonies" if any(w in lower for w in ["standup", "ceremonies", "retrospective", "review"])
+                else "technical_architecture"
+            )
+            stmt = text
+            stmt = re.sub(
+                r"^(?:I am deciding right now that|I'm deciding right now that|I'm making the call:?|I'm making this call:?|The decision is:?|We decided:?)\s*",
+                "",
+                stmt,
+                flags=re.IGNORECASE,
+            ).strip()
             decisions.append(
                 LLMDecision(
                     topic_key=topic,
-                    statement=text[:140],
-                    decided_by=speaker,
+                    statement=stmt[:140],
+                    decided_by=speaker if speaker not in ("NARRATOR", "Unknown") else None,
                     verbatim_quote=text,
                     confidence="HIGH",
                 )
             )
-        # Action item keywords
-        elif any(w in lower for w in ["will own", "i'll", "i will", "commit to", "take care of", "deadline", "by nov", "by dec", "who is taking", "who's taking", "deliver", "ready by"]):
-            has_owner = bool(speaker and speaker.lower() not in ["unknown", "anyone", "someone"])
-            has_deadline = any(m in lower for m in ["by ", "until ", "before ", "on ", "tomorrow", "next week"])
-            missing = []
-            if not has_owner:
+
+        # Action item extraction
+        elif any(w in lower for w in action_triggers):
+            if any(b in lower for b in ["talk about", "discuss", "chat about", "think about"]):
+                continue
+
+            owner = resolve_action_item_owner(text, speaker, participants)
+            deadline_iso, deadline_raw = _parse_dynamic_date(text, meeting_date)
+
+            missing: list[str] = []
+            if not owner:
                 missing.append("owner")
-            if not has_deadline:
+            if not deadline_iso:
                 missing.append("deadline")
+
+            clean_title = _clean_action_title(text)
+
+            # Check if mentions a dependency on another task or person
+            depends_on = None
+            for other_p in participants:
+                if other_p != owner and other_p.lower() in lower and any(k in lower for k in ["once", "after", "depends", "dependent"]):
+                    depends_on = f"Prerequisite by {other_p}"
+                    break
 
             action_items.append(
                 LLMActionItem(
-                    title=text[:90],
+                    title=clean_title,
                     description=text,
-                    owner=speaker if has_owner else None,
-                    deadline_iso=meeting_date if has_deadline else None,
-                    deadline_raw=text if has_deadline else None,
-                    priority="HIGH" if any(w in lower for w in ["urgent", "critical", "asap", "first", "blocker"]) else "MEDIUM",
-                    depends_on_task_title=None,
+                    owner=owner,
+                    deadline_iso=deadline_iso,
+                    deadline_raw=deadline_raw,
+                    priority="HIGH" if any(w in lower for w in ["urgent", "critical", "asap", "first", "blocker", "p0"]) else "MEDIUM",
+                    depends_on_task_title=depends_on,
                     verbatim_quote=text,
                     status="READY_TO_APPROVE" if not missing else "NEEDS_CLARIFICATION",
                     missing_fields=missing if missing else None,
-                    clarification_prompt=f"Clarify missing {', '.join(missing)} for this task." if missing else None,
+                    clarification_prompt=f"Clarify missing {', '.join(missing)} for '{clean_title}'." if missing else None,
                 )
             )
 
@@ -561,9 +801,9 @@ def _find_decision_conflict(
                     previous_meeting_date=old_meeting.meeting_date,
                     previous_quote=old_dec.verbatim_quote,
                     conflict_explanation=(
-                        f"New decision on '{new_dec.topic_key}' appears to contradict "
+                        f"New decision on '{new_dec.topic_key}' by {new_dec.decided_by or 'team'} appears to contradict "
                         f"an ACTIVE decision from meeting '{old_meeting.title}' "
-                        f"({old_meeting.meeting_date}). "
+                        f"({old_meeting.meeting_date}) decided by {old_dec.decided_by or 'previous leadership'}. "
                         f"Previous: \"{old_dec.statement}\". "
                         f"New: \"{new_dec.statement}\"."
                     ),
@@ -707,11 +947,13 @@ async def analyze_blast_radius(
                     )
                 )
 
+        owners = list(dict.fromkeys(t.owner for t in impacted if t.owner))
+        owners_mention = f"with {', '.join(f'@{o}' for o in owners)}" if owners else "with task owners"
         return BlastRadiusReport(
             risk_level="CRITICAL",
             impacted_tasks=impacted,
             estimated_delay_days=7,
-            mitigation_suggestion="Cut secondary feature scope (OAuth v2 / full E2E suite), enforce an immediate feature freeze, and shift to rapid smoke tests to absorb launch acceleration.",
+            mitigation_suggestion=f"Align {owners_mention} to cut secondary scope, enforce a feature freeze, and accelerate testing to absorb launch acceleration.",
         )
 
     # Case B: Database architecture pivot (PostgreSQL -> MongoDB)
@@ -747,11 +989,13 @@ async def analyze_blast_radius(
                 )
             )
 
+        owners = list(dict.fromkeys(t.owner for t in impacted if t.owner))
+        owners_mention = f"with {', '.join(f'@{o}' for o in owners)}" if owners else "with backend owners"
         return BlastRadiusReport(
             risk_level="HIGH",
             impacted_tasks=impacted,
             estimated_delay_days=4,
-            mitigation_suggestion="Confine MongoDB to analytics collections while preserving PostgreSQL for core authentication, or extend backend sprint capacity by 4 days to absorb schema refactoring.",
+            mitigation_suggestion=f"Align {owners_mention} on schema and API migration contracts, or extend sprint capacity by 4 days to absorb refactoring.",
         )
 
     # Case C: Blocker dependency risk
@@ -787,11 +1031,14 @@ async def analyze_blast_radius(
                     impact_reason="Potentially impacted by contradictory decision regarding " + (item_payload.get("topic_key") or "architecture"),
                 )
             )
+        topic_name = item_payload.get('topic_key') or 'architecture'
+        decided = item_payload.get('decided_by')
+        speaker_mention = f"led by @{decided}" if decided else ""
         return BlastRadiusReport(
             risk_level="HIGH",
             impacted_tasks=impacted,
             estimated_delay_days=3,
-            mitigation_suggestion=f"Convene an immediate alignment huddle to resolve conflicting decisions on '{item_payload.get('topic_key', 'topic')}' before approving downstream tasks.",
+            mitigation_suggestion=f"Convene an immediate alignment huddle {speaker_mention} to resolve conflicting decisions on '{topic_name}' before approving downstream tasks.".strip(),
         )
 
     return None
@@ -810,26 +1057,28 @@ def generate_nudge_draft(
     """Generates a concise, polite, quote-backed follow-up message."""
     title = item_payload.get("title") or item_payload.get("statement") or "Commitment"
     owner = item_payload.get("owner")
+    decided_by = item_payload.get("decided_by")
     quote = item_payload.get("verbatim_quote")
     quote_snip = f' (Quote: "{quote[:90]}...")' if quote else ""
 
     if state == "NEEDS_CLARIFICATION":
         prompt = item_payload.get("clarification_prompt")
+        recipient = f"@{owner}" if owner else "@team"
         if prompt:
-            return f"Hi team, regarding '{title}'{quote_snip}: {prompt} Please confirm so we can stage this on the execution board."
-        return f"Hi team, regarding '{title}'{quote_snip}: we still need to confirm the owner and deadline. Could someone please confirm who can take this?"
+            return f"Hi {recipient}, regarding '{title}'{quote_snip}: {prompt} Please confirm so we can stage this on the execution board."
+        return f"Hi {recipient}, regarding '{title}'{quote_snip}: we still need to confirm the owner and deadline. Could someone please confirm who can take this?"
 
     if conflict and conflict.conflict_type == "BLOCKER_RISK":
-        recipient = f"@{owner}" if owner else "team"
+        recipient = f"@{owner}" if owner else "@team"
         return f"Hi {recipient}, heads up on '{title}'{quote_snip}: this task has a dependency that finishes after its target deadline, creating a blocker. Can we align on timeline adjustments?"
 
     if conflict and conflict.conflict_type == "CONFLICT":
-        decided_by = item_payload.get("decided_by")
-        recipient = f"@{decided_by}" if decided_by else "team"
-        return f"Hi {recipient}, a cross-meeting conflict was detected regarding '{title}'{quote_snip}, contradicting our previous active decision. Please review and choose whether to supersede or retain the original decision."
+        recipient = f"@{decided_by}" if decided_by else (f"@{owner}" if owner else "@team")
+        prev_meeting = conflict.previous_meeting_title or "previous meeting"
+        return f"Hi {recipient}, a cross-meeting conflict was detected regarding '{title}'{quote_snip}, which contradicts our active decision from '{prev_meeting}'. Please review and choose whether to supersede or retain the original decision."
 
     if state == "STALE_TASK":
-        recipient = f"@{owner}" if owner else "team"
+        recipient = f"@{owner}" if owner else "@team"
         dl = item_payload.get("deadline_iso", "past deadline")
         return f"Hi {recipient}, friendly check-in on '{title}' (due {dl}). This task is still in TODO status. Please share a quick update or flag if you are blocked."
 

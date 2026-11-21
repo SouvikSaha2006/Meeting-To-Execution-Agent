@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from 'react';
+import { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import { parsePayload, parseConflictMeta, parseBlastRadius } from '../../../api/client.js';
 import { NudgeModal } from '../NudgeModal.jsx';
 
@@ -728,7 +728,41 @@ function StagingQueue({ state, actions, onToast, onOpenNudge }) {
 }
 
 // ─── Ingest Form with Live Voice Dictation ──────────────────────────────────
-const SPEAKERS = ['Sarah (PM)', 'Rohan (Backend)', 'Ananya (Design)'];
+const DEFAULT_SPEAKERS = ['Sarah (PM)', 'Rohan (Backend)', 'Ananya (Design)'];
+
+function extractSpeakersFromTranscript(raw) {
+  if (!raw) return [];
+  const lines = raw.split(/\r\n|\r|\n/);
+  const detected = new Set();
+
+  const regexes = [
+    /^\s*(?:\[(?:\d{1,2}:\d{2}(?::\d{2})?|\d{1,2}:\d{2}\s*(?:AM|PM)?)\]|\d{1,2}:\d{2}\s*(?:AM|PM)?\s*[-–])\s*\[?([A-Za-z0-9_.\- ]+?)(?:\s*\([^)]*\))?\]?\s*:\s*/i,
+    /^\s*\[([A-Za-z0-9_.\- ]+?)(?:\s*\([^)]*\))?\]\s*:\s*/,
+    /^\s*\*\*([A-Za-z0-9_.\- ]+?)(?:\s*\([^)]*\))?\*\*\s*:\s*/,
+    /^\s*([A-Za-z][A-Za-z0-9_.\- ]{0,35})\s*:\s*/,
+  ];
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    for (const rgx of regexes) {
+      const match = trimmed.match(rgx);
+      if (match && match[1]) {
+        let name = match[1].trim();
+        name = name.replace(/^\[|\]$/g, '').replace(/^\*\*|\*\*$/g, '').trim();
+        if (
+          name &&
+          name.length >= 2 &&
+          !/^(https?|ftp|note|action|decision|agenda|re|fwd)$/i.test(name)
+        ) {
+          detected.add(name);
+          break;
+        }
+      }
+    }
+  }
+  return Array.from(detected);
+}
 
 function formatFilenameToTitle(filename) {
   if (!filename) return '';
@@ -753,13 +787,32 @@ function IngestForm({ state, actions }) {
   const fileInputRef = useRef(null);
   const dropRef = useRef(null);
 
+  // Dynamic Speaker Detection from Transcript
+  const detectedSpeakers = useMemo(() => {
+    return extractSpeakersFromTranscript(transcript);
+  }, [transcript]);
+
+  const availableSpeakers = useMemo(() => {
+    if (detectedSpeakers.length > 0) {
+      return detectedSpeakers;
+    }
+    return DEFAULT_SPEAKERS;
+  }, [detectedSpeakers]);
+
   // Live Voice Dictation state
   const [isListening, setIsListening] = useState(false);
-  const [activeSpeaker, setActiveSpeaker] = useState('Sarah (PM)');
+  const [activeSpeaker, setActiveSpeaker] = useState(DEFAULT_SPEAKERS[0]);
   const [speechSupported, setSpeechSupported] = useState(true);
   const [speechError, setSpeechError] = useState(null);
   const recognitionRef = useRef(null);
   const activeSpeakerRef = useRef(activeSpeaker);
+
+  // Sync activeSpeaker if current speaker is not in availableSpeakers
+  useEffect(() => {
+    if (availableSpeakers.length > 0 && !availableSpeakers.includes(activeSpeaker)) {
+      setActiveSpeaker(availableSpeakers[0]);
+    }
+  }, [availableSpeakers, activeSpeaker]);
 
   // Keep ref synced with latest selected speaker
   useEffect(() => {
@@ -819,8 +872,9 @@ function IngestForm({ state, actions }) {
         }
         const clean = finalChunk.trim();
         if (clean) {
-          const speakerPrefix = activeSpeakerRef.current.split(' ')[0]; // 'Sarah', 'Rohan', 'Ananya'
-          const formattedLine = `[${speakerPrefix}]: ${clean}`;
+          const raw = activeSpeakerRef.current || 'Speaker';
+          const cleanPrefix = raw.replace(/\s*\([^)]*\)/, '').trim() || raw;
+          const formattedLine = `[${cleanPrefix}]: ${clean}`;
           setTranscript((prev) => (prev ? `${prev.trim()}\n${formattedLine}` : formattedLine));
         }
       };
@@ -849,7 +903,9 @@ function IngestForm({ state, actions }) {
   }
 
   function insertSampleConflict() {
-    const sample = `[Sarah]: The launch date is now moved to November 22nd. No scope is being cut — the full feature set needs to ship. I'm making this call as PM.`;
+    const raw = activeSpeakerRef.current || 'Sarah';
+    const cleanPrefix = raw.replace(/\s*\([^)]*\)/, '').trim() || raw;
+    const sample = `[${cleanPrefix}]: The launch date is now moved to November 22nd. No scope is being cut — the full feature set needs to ship. I'm making this call as lead.`;
     setTranscript((prev) => (prev ? `${prev.trim()}\n${sample}` : sample));
     if (!title) setTitle('Architecture & Scope Sync');
     if (!meetingDate) setMeetingDate('2024-11-21');
@@ -997,15 +1053,16 @@ function IngestForm({ state, actions }) {
           {/* Quick Speaker Selector Pills */}
           <div className="ws-speaker-selector-bar">
             <span className="ws-speaker-selector-label">Speaker:</span>
-            {SPEAKERS.map((spk) => {
+            {availableSpeakers.map((spk) => {
               const isSelected = activeSpeaker === spk;
+              const cleanPrefix = spk.replace(/\s*\([^)]*\)/, '').trim() || spk;
               return (
                 <button
                   key={spk}
                   type="button"
                   className={`ws-speaker-pill ${isSelected ? 'active' : ''}`}
                   onClick={() => setActiveSpeaker(spk)}
-                  title={`Prefix spoken lines with [${spk.split(' ')[0]}]:`}
+                  title={`Prefix spoken lines with [${cleanPrefix}]:`}
                 >
                   <span className="ws-speaker-dot" />
                   {spk}

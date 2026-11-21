@@ -13,6 +13,7 @@ import './VelaHero.css';
 
 /* ── Icon with CSS-mask tint overlay ──────────────────────────── */
 function VerbIcon({ verb, iconWrapRef, iconImgRef, tintRef }) {
+  const currentVerb = verb || VERBS[0];
   return (
     <span
       className="verb-icon-wrap"
@@ -22,7 +23,7 @@ function VerbIcon({ verb, iconWrapRef, iconImgRef, tintRef }) {
       <img
         ref={iconImgRef}
         className="verb-icon-img"
-        src={verb.iconUrl}
+        src={currentVerb.iconUrl}
         alt=""
         draggable="false"
       />
@@ -30,9 +31,9 @@ function VerbIcon({ verb, iconWrapRef, iconImgRef, tintRef }) {
         ref={tintRef}
         className="verb-icon-tint"
         style={{
-          backgroundColor: verb.tint,
-          mask: `url(${verb.iconUrl}) center / contain no-repeat`,
-          WebkitMask: `url(${verb.iconUrl}) center / contain no-repeat`,
+          backgroundColor: currentVerb.tint,
+          mask: `url(${currentVerb.iconUrl}) center / contain no-repeat`,
+          WebkitMask: `url(${currentVerb.iconUrl}) center / contain no-repeat`,
         }}
       />
     </span>
@@ -63,7 +64,7 @@ function IconShield({ size = 18 }) {
 }
 
 /* ── Main Component ──────────────────────────────────────────── */
-export function VelaHero({ onTryDemo, onConflictTest }) {
+export function VelaHero({ onTryDemo, onConflictTest, onNavigateTab }) {
   const [verbIndex, setVerbIndex]           = useState(0);
   const [executeHighlight, setExecuteHighlight] = useState(false);
 
@@ -77,22 +78,24 @@ export function VelaHero({ onTryDemo, onConflictTest }) {
   const engineRef   = useRef(null);
 
   /* Active verb data */
-  const verb = VERBS[verbIndex];
+  const verb = (VERBS && VERBS[verbIndex]) ? VERBS[verbIndex] : (VERBS ? VERBS[0] : null);
 
   /* Callback when engine advances the verb */
   const handleVerbChange = useCallback((idx) => {
-    setVerbIndex(idx);
-    // Update icon src & tint immediately
-    const newVerb = VERBS[idx];
-    if (iconImgRef.current) {
+    if (!VERBS || VERBS.length === 0) return;
+    const validIdx = idx >= 0 && idx < VERBS.length ? idx : 0;
+    setVerbIndex(validIdx);
+    const newVerb = VERBS[validIdx];
+    if (!newVerb) return;
+    if (iconImgRef.current && newVerb.iconUrl) {
       iconImgRef.current.src = newVerb.iconUrl;
     }
-    if (tintRef.current) {
+    if (tintRef.current && newVerb.tint) {
       tintRef.current.style.backgroundColor = newVerb.tint;
       tintRef.current.style.mask            = `url(${newVerb.iconUrl}) center / contain no-repeat`;
       tintRef.current.style.WebkitMask      = `url(${newVerb.iconUrl}) center / contain no-repeat`;
     }
-    if (verbTextRef.current) {
+    if (verbTextRef.current && newVerb.label) {
       verbTextRef.current.textContent = newVerb.label;
     }
   }, []);
@@ -150,7 +153,7 @@ export function VelaHero({ onTryDemo, onConflictTest }) {
         <GrainOverlay />
 
         {/* Navigation */}
-        <VelaNav />
+        <VelaNav onNavigateTab={onNavigateTab} />
 
         {/* ── Headline ─────────────────────────────── */}
         <div className="hero-headline-wrap">
@@ -167,7 +170,7 @@ export function VelaHero({ onTryDemo, onConflictTest }) {
                 ref={verbTextRef}
                 className="verb-text-slot"
               >
-                {verb.label}
+                {verb?.label || 'Verify'}
               </span>
             </span>
 
@@ -202,7 +205,7 @@ export function VelaHero({ onTryDemo, onConflictTest }) {
           </button>
 
           <p className="hero-caption">
-            Vela is an autonomous meeting-to-execution agent that<br />
+            VeriFlow is an autonomous meeting-to-execution agent that<br />
             catches cross-meeting conflicts before tasks ship.
           </p>
         </div>

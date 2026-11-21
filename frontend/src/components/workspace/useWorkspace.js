@@ -201,6 +201,13 @@ function workspaceReducer(state, action) {
         toasts: state.toasts.filter((t) => t.id !== action.id),
       };
 
+    case 'CLEAR_ERROR_TOASTS':
+      return {
+        ...state,
+        toasts: state.toasts.filter((t) => t.type !== 'error'),
+        error: null,
+      };
+
     case 'RESET_ALL':
       return {
         ...initialState,
@@ -216,6 +223,47 @@ export function useWorkspace() {
   const [state, dispatch] = useReducer(workspaceReducer, initialState);
   const toastSeqRef = useRef(0);
   const recentToastsRef = useRef(new Map());
+  const isInitialMountRef = useRef(true);
+  const stateRef = useRef(state);
+  stateRef.current = state;
+
+  const isTransientError = (err) => {
+    if (!err) return false;
+    if (err.name === 'AbortError') return true;
+    const msg = String(err?.detail || err?.message || '').toLowerCase();
+    return (
+      msg.includes('aborted') ||
+      msg.includes('failed to fetch') ||
+      msg.includes('networkerror') ||
+      msg.includes('load failed') ||
+      msg.includes('cold-start') ||
+      msg.includes('timeout')
+    );
+  };
+
+  /**
+   * Helper that retries an async fetch function up to `retries` times with backoff,
+   * without firing intermediate error toasts.
+   * Only throws if all retries fail.
+   */
+  const fetchWithRetry = useCallback(async (fn, retries = 2, delayMs = 1200) => {
+    let lastError = null;
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        const result = await fn();
+        return result;
+      } catch (err) {
+        lastError = err;
+        if (err?.name === 'AbortError' || err?.detail?.includes('aborted')) {
+          throw err;
+        }
+        if (attempt < retries) {
+          await new Promise((r) => setTimeout(r, delayMs * (attempt + 1)));
+        }
+      }
+    }
+    throw lastError;
+  }, []);
 
   const addToast = useCallback((message, type = 'info') => {
     if (!message) return;
@@ -238,93 +286,116 @@ export function useWorkspace() {
   const loadStaging = useCallback(async () => {
     dispatch({ type: 'SET_LOADING', key: 'staging', value: true });
     try {
-      const data = await api.getStaging();
+      const data = await fetchWithRetry(() => api.getStaging());
       dispatch({ type: 'SET_STAGING', staging: data });
+      dispatch({ type: 'CLEAR_ERROR_TOASTS' });
+      isInitialMountRef.current = false;
     } catch (err) {
       dispatch({ type: 'SET_ERROR', error: err?.detail || 'Failed to load approval queue.' });
-      addToast(err?.detail || `Could not connect to backend at ${api.API_BASE || 'API server'}`, 'error');
+      const hasData = (stateRef.current.staging?.length || 0) > 0;
+      const transient = isTransientError(err);
+      if (!hasData && !(isInitialMountRef.current && transient)) {
+        addToast(err?.detail || `Could not connect to backend at ${api.API_BASE || 'API server'}`, 'error');
+      }
     } finally {
       dispatch({ type: 'SET_LOADING', key: 'staging', value: false });
     }
-  }, [addToast]);
+  }, [addToast, fetchWithRetry]);
 
   const loadTasks = useCallback(async () => {
     dispatch({ type: 'SET_LOADING', key: 'tasks', value: true });
     try {
-      const data = await api.getTasks();
+      const data = await fetchWithRetry(() => api.getTasks());
       dispatch({ type: 'SET_TASKS', tasks: data });
+      dispatch({ type: 'CLEAR_ERROR_TOASTS' });
+      isInitialMountRef.current = false;
     } catch (err) {
       dispatch({ type: 'SET_ERROR', error: err?.detail || 'Failed to load tasks.' });
-      addToast(err?.detail || 'Could not load execution tasks', 'error');
+      const hasData = (stateRef.current.tasks?.length || 0) > 0;
+      const transient = isTransientError(err);
+      if (!hasData && !(isInitialMountRef.current && transient)) {
+        addToast(err?.detail || 'Could not load execution tasks', 'error');
+      }
     } finally {
       dispatch({ type: 'SET_LOADING', key: 'tasks', value: false });
     }
-  }, [addToast]);
+  }, [addToast, fetchWithRetry]);
 
   const loadDecisions = useCallback(async () => {
     dispatch({ type: 'SET_LOADING', key: 'decisions', value: true });
     try {
-      const data = await api.getDecisions();
+      const data = await fetchWithRetry(() => api.getDecisions());
       dispatch({ type: 'SET_DECISIONS', decisions: data });
+      dispatch({ type: 'CLEAR_ERROR_TOASTS' });
+      isInitialMountRef.current = false;
     } catch (err) {
       dispatch({ type: 'SET_ERROR', error: err?.detail || 'Failed to load decisions.' });
-      addToast(err?.detail || 'Could not load decisions log', 'error');
+      const hasData = (stateRef.current.decisions?.length || 0) > 0;
+      const transient = isTransientError(err);
+      if (!hasData && !(isInitialMountRef.current && transient)) {
+        addToast(err?.detail || 'Could not load decisions log', 'error');
+      }
     } finally {
       dispatch({ type: 'SET_LOADING', key: 'decisions', value: false });
     }
-  }, [addToast]);
+  }, [addToast, fetchWithRetry]);
 
   const loadDigest = useCallback(async (isSilent = false) => {
     dispatch({ type: 'SET_LOADING', key: 'digest', value: true });
     try {
-      let data = null;
-      try {
-        data = await api.getWeeklyDigest();
-      } catch (firstErr) {
-        // Cold-start 1-retry with 2-second backoff
-        await new Promise((r) => setTimeout(r, 2000));
-        data = await api.getWeeklyDigest();
-      }
+      const data = await fetchWithRetry(() => api.getWeeklyDigest());
       if (data) {
         dispatch({ type: 'SET_DIGEST', digest: data });
+        dispatch({ type: 'CLEAR_ERROR_TOASTS' });
+        isInitialMountRef.current = false;
       }
     } catch (err) {
       dispatch({ type: 'SET_ERROR', error: err?.detail || 'Failed to generate weekly digest.' });
-      if (!isSilent) {
+      const hasData = stateRef.current.digest != null;
+      const transient = isTransientError(err);
+      if (!isSilent && !hasData && !(isInitialMountRef.current && transient)) {
         addToast(err?.detail || 'Could not generate weekly digest', 'error');
       }
     } finally {
       dispatch({ type: 'SET_LOADING', key: 'digest', value: false });
     }
-  }, [addToast]);
+  }, [addToast, fetchWithRetry]);
 
   const loadLineageGraph = useCallback(async (meetingId = null) => {
     dispatch({ type: 'SET_LOADING', key: 'lineage', value: true });
     try {
-      const data = await api.getLineageGraph(meetingId);
+      const data = await fetchWithRetry(() => api.getLineageGraph(meetingId));
       dispatch({ type: 'SET_LINEAGE_GRAPH', graph: data });
+      dispatch({ type: 'CLEAR_ERROR_TOASTS' });
+      isInitialMountRef.current = false;
     } catch (err) {
       dispatch({ type: 'SET_ERROR', error: err?.detail || 'Failed to build lineage graph.' });
-      addToast(err?.detail || 'Could not load decision lineage graph', 'error');
+      const hasData = stateRef.current.lineageGraph != null;
+      const transient = isTransientError(err);
+      if (!hasData && !(isInitialMountRef.current && transient)) {
+        addToast(err?.detail || 'Could not load decision lineage graph', 'error');
+      }
     } finally {
       dispatch({ type: 'SET_LOADING', key: 'lineage', value: false });
     }
-  }, [addToast]);
+  }, [addToast, fetchWithRetry]);
 
   const loadAnalytics = useCallback(async () => {
     dispatch({ type: 'SET_LOADING', key: 'analytics', value: true });
     try {
-      const data = await api.getAnalyticsHealth();
+      const data = await fetchWithRetry(() => api.getAnalyticsHealth());
       dispatch({ type: 'SET_ANALYTICS', analytics: data });
       if (data?.stale_tasks) {
         dispatch({ type: 'SET_STALE_COMMITMENTS', commitments: data.stale_tasks });
       }
+      dispatch({ type: 'CLEAR_ERROR_TOASTS' });
+      isInitialMountRef.current = false;
     } catch (err) {
       // analytics optional fail
     } finally {
       dispatch({ type: 'SET_LOADING', key: 'analytics', value: false });
     }
-  }, []);
+  }, [fetchWithRetry]);
 
   const sendNudgeAction = useCallback(async ({ target_type, target_id, recipient, channel = 'slack', message, signal }) => {
     dispatch({ type: 'SET_LOADING', key: 'nudge', value: true });
@@ -362,14 +433,15 @@ export function useWorkspace() {
 
   const loadUpcomingReminders = useCallback(async () => {
     try {
-      const res = await api.getUpcomingReminders();
+      const res = await fetchWithRetry(() => api.getUpcomingReminders());
       const list = res?.reminders || [];
       dispatch({ type: 'SET_UPCOMING_REMINDERS', reminders: list });
+      dispatch({ type: 'CLEAR_ERROR_TOASTS' });
       return list;
     } catch (err) {
       console.warn('Failed to load upcoming reminders', err);
     }
-  }, []);
+  }, [fetchWithRetry]);
 
   const dispatchAllRemindersAction = useCallback(async () => {
     dispatch({ type: 'SET_LOADING', key: 'reminders', value: true });
@@ -614,6 +686,7 @@ export function useWorkspace() {
       resetDemo,
       switchTab,
       addToast,
+      clearErrorToasts: () => dispatch({ type: 'CLEAR_ERROR_TOASTS' }),
     },
   };
 }

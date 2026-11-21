@@ -730,11 +730,27 @@ function StagingQueue({ state, actions, onToast, onOpenNudge }) {
 // ─── Ingest Form with Live Voice Dictation ──────────────────────────────────
 const SPEAKERS = ['Sarah (PM)', 'Rohan (Backend)', 'Ananya (Design)'];
 
+function formatFilenameToTitle(filename) {
+  if (!filename) return '';
+  const base = filename.replace(/\.[^/.]+$/, '');
+  return base
+    .replace(/[-_]+/g, ' ')
+    .trim()
+    .split(' ')
+    .filter(Boolean)
+    .map((w) => {
+      if (w.toUpperCase() === w && w.length <= 4) return w;
+      return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase();
+    })
+    .join(' ');
+}
+
 function IngestForm({ state, actions }) {
   const [title, setTitle] = useState('');
   const [meetingDate, setMeetingDate] = useState('');
   const [transcript, setTranscript] = useState('');
-  const [dragOver, setDragOver] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
+  const fileInputRef = useRef(null);
   const dropRef = useRef(null);
 
   // Live Voice Dictation state
@@ -841,28 +857,69 @@ function IngestForm({ state, actions }) {
 
   const isLoading = state.loading?.ingest === true;
 
-  function handleFileRead(file) {
+  function processTranscriptFile(file) {
+    if (!file) return;
+    const isValidExt = file.name.endsWith('.txt') || file.name.endsWith('.md');
+    const isValidMime = file.type === 'text/plain' || file.type === 'text/markdown';
+
+    if (!isValidExt && !isValidMime) {
+      actions?.addToast?.('Please upload a .txt or .md transcript file', 'error');
+      return;
+    }
+
     const reader = new FileReader();
-    reader.onload = (e) => setTranscript(e.target.result ?? '');
+    reader.onload = (evt) => {
+      const content = evt.target?.result ?? '';
+      setTranscript(content);
+
+      if (!title.trim()) {
+        setTitle(formatFilenameToTitle(file.name));
+      }
+      if (!meetingDate) {
+        const todayIso = new Date().toISOString().split('T')[0];
+        setMeetingDate(todayIso);
+      }
+
+      const lines = content.split(/\r\n|\r|\n/).filter((l) => l.trim().length > 0).length || 1;
+      actions?.addToast?.(`Loaded ${file.name} (${lines} lines) ✓`, 'success');
+    };
     reader.readAsText(file);
   }
 
-  function handleDrop(e) {
-    e.preventDefault();
-    setDragOver(false);
-    const file = e.dataTransfer.files?.[0];
-    if (file && (file.name.endsWith('.txt') || file.name.endsWith('.md'))) {
-      handleFileRead(file);
+  function handleFileSelect(e) {
+    const file = e.target.files?.[0];
+    if (file) {
+      processTranscriptFile(file);
     }
+    e.target.value = '';
+  }
+
+  function handleDragEnter(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(true);
   }
 
   function handleDragOver(e) {
     e.preventDefault();
-    setDragOver(true);
+    e.stopPropagation();
+    setIsDragging(true);
   }
 
-  function handleDragLeave() {
-    setDragOver(false);
+  function handleDragLeave(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+  }
+
+  function handleDrop(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+    const file = e.dataTransfer?.files?.[0];
+    if (file) {
+      processTranscriptFile(file);
+    }
   }
 
   async function handleSubmit(e) {
@@ -980,15 +1037,34 @@ function IngestForm({ state, actions }) {
           />
         </div>
 
+        {/* Hidden File Input for Click-to-Browse */}
+        <input
+          type="file"
+          accept=".txt,.md,text/plain,text/markdown"
+          ref={fileInputRef}
+          onChange={handleFileSelect}
+          style={{ display: 'none' }}
+        />
+
         {/* Dropzone */}
         <div
           ref={dropRef}
-          className={`ws-dropzone ${dragOver ? 'ws-dropzone--over' : ''}`}
-          onDrop={handleDrop}
+          className={`ws-dropzone ${isDragging ? 'is-dragging ws-dropzone--over' : ''}`}
+          onClick={() => fileInputRef.current?.click()}
+          onDragEnter={handleDragEnter}
           onDragOver={handleDragOver}
           onDragLeave={handleDragLeave}
+          onDrop={handleDrop}
+          title="Click to browse or drop a .txt or .md transcript file"
         >
-          Drop .txt or .md file to auto-fill
+          <div className="ws-dropzone-content">
+            <span className="ws-dropzone-icon">📄</span>
+            <span className="ws-dropzone-text">
+              {isDragging
+                ? 'Release to load transcript file...'
+                : 'Drop .txt or .md file to auto-fill (or click to browse)'}
+            </span>
+          </div>
         </div>
 
         <button

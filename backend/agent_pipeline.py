@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 DEMO_MODE: bool = os.getenv("DEMO_MODE", "false").lower() in ("true", "1", "yes")
 GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL: str = "gemini-2.5-flash"
+GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -253,18 +253,22 @@ async def extract_commitments_llm(
         transcript=attributed_transcript,
     )
 
-    if DEMO_MODE or not GEMINI_API_KEY:
-        logger.info("DEMO_MODE active — using mock extraction result")
+    active_demo_mode = os.getenv("DEMO_MODE", "false").lower() in ("true", "1", "yes")
+    active_api_key = os.getenv("GEMINI_API_KEY", "") or GEMINI_API_KEY
+    active_model = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
+
+    if active_demo_mode or not active_api_key:
+        logger.info("DEMO_MODE active or GEMINI_API_KEY missing — using mock extraction result")
         return _mock_extraction_result(title, meeting_date)
 
     try:
         import google.genai as genai
         from google.genai import types as genai_types
 
-        client = genai.Client(api_key=GEMINI_API_KEY)
+        client = genai.Client(api_key=active_api_key)
 
         response = client.models.generate_content(
-            model=GEMINI_MODEL,
+            model=active_model,
             contents=[
                 genai_types.Content(
                     role="user",

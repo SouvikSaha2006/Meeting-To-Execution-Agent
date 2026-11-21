@@ -24,8 +24,27 @@ import datetime
 import json
 import logging
 import os
+import sys
 from contextlib import asynccontextmanager
 from typing import Any, List, Optional
+
+# Ensure repository root is in sys.path
+_backend_dir = os.path.dirname(os.path.abspath(__file__))
+_root_dir = os.path.dirname(_backend_dir)
+if _root_dir not in sys.path:
+    sys.path.insert(0, _root_dir)
+
+from dotenv import load_dotenv
+
+# Load .env
+for _env_candidate in [
+    os.path.join(_root_dir, ".env"),
+    os.path.join(_backend_dir, ".env"),
+    ".env",
+]:
+    if os.path.exists(_env_candidate):
+        load_dotenv(_env_candidate)
+        break
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -382,10 +401,12 @@ async def health_check(db: AsyncSession = Depends(get_db)):
 
     # Test Gemini API key presence
     gemini_key = os.getenv("GEMINI_API_KEY", "")
-    if DEMO_MODE:
+    active_demo = os.getenv("DEMO_MODE", "false").lower() in ("true", "1", "yes")
+    model_name = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
+    if active_demo:
         gemini_status = "demo_mode (bypassed)"
     elif gemini_key:
-        gemini_status = "configured"
+        gemini_status = f"configured ({model_name})"
     else:
         gemini_status = "not_configured (set GEMINI_API_KEY)"
 
@@ -393,7 +414,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         status="healthy" if db_status == "ok" else "degraded",
         database=db_status,
         gemini_api=gemini_status,
-        demo_mode=DEMO_MODE,
+        demo_mode=active_demo,
         github_integration=github_status(),
         webhook_integration=webhook_status(),
         version=APP_VERSION,
@@ -968,3 +989,8 @@ async def weekly_digest(db: AsyncSession = Depends(get_db)):
         owners=owners,
         markdown="\n".join(md_lines),
     )
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("backend.main:app", host="0.0.0.0", port=8000, reload=True)

@@ -1,0 +1,275 @@
+"""
+schemas.py — Pydantic v2 request / response schemas and LLM structured-output schemas.
+
+Sections
+--------
+1. LLM Output Schemas  (strict JSON structures the Gemini model must produce)
+2. API Request Schemas
+3. API Response Schemas
+"""
+from __future__ import annotations
+
+import datetime
+from typing import Any, List, Literal, Optional
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 1. LLM OUTPUT SCHEMAS  (fed directly to Gemini as response_schema)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class LLMDecision(BaseModel):
+    """A single decision extracted by the LLM."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    topic_key: str = Field(
+        description="Short machine-readable slug, e.g. 'database_choice' or 'launch_date'"
+    )
+    statement: str = Field(description="Full decision statement in one clear sentence")
+    decided_by: Optional[str] = Field(
+        default=None,
+        description="Name of the person who made the decision, or null if ambiguous",
+    )
+    verbatim_quote: str = Field(
+        description="Exact verbatim quote from the transcript supporting this decision"
+    )
+    confidence: Literal["HIGH", "MEDIUM", "LOW"] = Field(
+        description="Confidence that this is a real committed decision vs. speculation"
+    )
+
+
+class LLMActionItem(BaseModel):
+    """A single action item extracted by the LLM."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    title: str = Field(description="Short imperative title, e.g. 'Set up CI/CD pipeline'")
+    description: str = Field(description="Detailed description of what must be done")
+    owner: Optional[str] = Field(
+        default=None,
+        description="Assigned person's name. MUST be null if not explicitly stated in transcript.",
+    )
+    deadline_iso: Optional[str] = Field(
+        default=None,
+        description="ISO 8601 deadline date string (YYYY-MM-DD). MUST be null if not stated.",
+    )
+    deadline_raw: Optional[str] = Field(
+        default=None,
+        description="Raw deadline text as spoken, e.g. 'by end of sprint', 'next Friday'",
+    )
+    priority: Literal["HIGH", "MEDIUM", "LOW"] = Field(
+        description="Task priority inferred from urgency language"
+    )
+    depends_on_task_title: Optional[str] = Field(
+        default=None,
+        description="Title of another action item this task depends on, or null",
+    )
+    verbatim_quote: str = Field(
+        description="Exact verbatim quote from the transcript supporting this action item"
+    )
+    status: Literal["READY_TO_APPROVE", "NEEDS_CLARIFICATION"] = Field(
+        description=(
+            "NEEDS_CLARIFICATION if owner or deadline is null/ambiguous. "
+            "READY_TO_APPROVE only when both are explicitly stated."
+        )
+    )
+    missing_fields: Optional[List[Literal["owner", "deadline"]]] = Field(
+        default=None,
+        description="List of fields that are missing and prevent approval",
+    )
+    clarification_prompt: Optional[str] = Field(
+        default=None,
+        description="Human-readable question to resolve missing info, or null",
+    )
+
+
+class LLMExtractionResult(BaseModel):
+    """Full structured output from Stage 2 extraction."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    decisions: List[LLMDecision] = Field(default_factory=list)
+    action_items: List[LLMActionItem] = Field(default_factory=list)
+
+
+# ── Speaker Segment (Stage 1 output) ─────────────────────────────────────────
+class SpeakerSegment(BaseModel):
+    speaker: str
+    text: str
+    line_start: int
+    line_end: int
+
+
+# ── Conflict / Duplicate meta ─────────────────────────────────────────────────
+class ConflictMeta(BaseModel):
+    conflict_type: Literal["CONFLICT", "DUPLICATE", "BLOCKER_RISK"]
+    conflicting_decision_id: Optional[int] = None
+    conflicting_task_id: Optional[int] = None
+    previous_meeting_title: Optional[str] = None
+    previous_meeting_date: Optional[str] = None
+    previous_quote: Optional[str] = None
+    conflict_explanation: str
+
+
+# ── Agent Trace Step ──────────────────────────────────────────────────────────
+class AgentTraceStep(BaseModel):
+    stage: int
+    name: str
+    status: Literal["running", "success", "error"]
+    input_summary: Optional[str] = None
+    output_summary: Optional[str] = None
+    duration_ms: Optional[int] = None
+    error: Optional[str] = None
+    timestamp: str = Field(
+        default_factory=lambda: datetime.datetime.now(datetime.timezone.utc).isoformat()
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 2. API REQUEST SCHEMAS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class MeetingIngestRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=512)
+    meeting_date: str = Field(
+        description="ISO 8601 date string, e.g. '2024-11-14'",
+        pattern=r"^\d{4}-\d{2}-\d{2}$",
+    )
+    raw_transcript: str = Field(min_length=10)
+
+
+class ResolveItemRequest(BaseModel):
+    """Payload for PATCH /api/staging/{item_id}/resolve"""
+
+    owner: Optional[str] = None
+    deadline_iso: Optional[str] = Field(
+        default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"
+    )
+    title: Optional[str] = None
+    conflict_resolution: Optional[Literal["SUPERSEDE_OLD", "KEEP_ORIGINAL"]] = None
+    notes: Optional[str] = None
+
+
+class RejectItemRequest(BaseModel):
+    reason: Optional[str] = Field(default=None, max_length=1024)
+
+
+class UpdateTaskStatusRequest(BaseModel):
+    status: Literal["TODO", "IN_PROGRESS", "DONE"]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 3. API RESPONSE SCHEMAS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class MeetingResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    title: str
+    meeting_date: str
+    created_at: datetime.datetime
+    agent_trace_json: Optional[str] = None
+
+
+class DecisionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    meeting_id: int
+    topic_key: str
+    statement: str
+    decided_by: Optional[str]
+    verbatim_quote: Optional[str]
+    confidence: Optional[str]
+    status: str
+    superseded_by_id: Optional[int]
+    created_at: datetime.datetime
+
+    # Convenience: include meeting title for the memory log view
+    meeting_title: Optional[str] = None
+    meeting_date: Optional[str] = None
+
+
+class StagingItemResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    meeting_id: int
+    item_type: str
+    payload_json: str
+    state: str
+    conflict_meta_json: Optional[str]
+    missing_fields_json: Optional[str]
+    clarification_prompt: Optional[str]
+    verbatim_quote: Optional[str]
+    rejection_reason: Optional[str]
+    created_at: datetime.datetime
+
+
+class ExecutionTaskResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    staging_item_id: Optional[int]
+    meeting_id: int
+    title: str
+    description: Optional[str]
+    owner: Optional[str]
+    deadline_iso: Optional[str]
+    priority: str
+    status: str
+    depends_on_id: Optional[int]
+    external_execution_receipt_json: Optional[str]
+    approved_at: Optional[datetime.datetime]
+
+
+class IngestResponse(BaseModel):
+    meeting: MeetingResponse
+    staging_items: List[StagingItemResponse]
+    agent_trace: List[AgentTraceStep]
+    summary: dict[str, Any]
+
+
+class HealthResponse(BaseModel):
+    status: str
+    database: str
+    gemini_api: str
+    demo_mode: bool
+    github_integration: str
+    webhook_integration: str
+    version: str
+    timestamp: str
+
+
+class ApproveResponse(BaseModel):
+    staging_item: StagingItemResponse
+    execution_task: Optional[ExecutionTaskResponse] = None
+    decision: Optional[DecisionResponse] = None
+    execution_receipt: Optional[dict] = None
+
+
+class BulkApproveResponse(BaseModel):
+    approved_count: int
+    skipped_count: int
+    results: List[ApproveResponse]
+
+
+class WeeklyDigestOwner(BaseModel):
+    owner: str
+    completed_tasks: List[dict]
+    newly_assigned: List[dict]
+    upcoming_deadlines: List[dict]
+    resolved_conflicts: List[dict]
+
+
+class WeeklyDigestResponse(BaseModel):
+    generated_at: str
+    period: str
+    owners: List[WeeklyDigestOwner]
+    markdown: str

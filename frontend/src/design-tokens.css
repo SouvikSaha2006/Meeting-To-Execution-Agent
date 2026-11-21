@@ -1,0 +1,82 @@
+/* ============================================================
+   VELA — Design Tokens
+   Single source of truth for the entire visual system
+   ============================================================ */
+
+@import url('https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600&display=swap');
+
+:root {
+  /* ── Typography ─────────────────────────────────────── */
+  --font-primary: 'Inter Tight', system-ui, -apple-system, sans-serif;
+
+  /* ── Ink / Text ─────────────────────────────────────── */
+  --ink-primary:   #0D0D0C;
+  --ink-secondary: rgba(13, 13, 12, 0.56);
+  --ink-hint:      rgba(13, 13, 12, 0.42);
+  --ink-muted:     rgba(13, 13, 12, 0.28);
+
+  /* ── Surface ────────────────────────────────────────── */
+  --surface-cream: #FBF6EF;
+  --surface-white: #FFFFFF;
+
+  /* ── Verb Palette ───────────────────────────────────── */
+  --capture-tint:  #E9C22E;
+  --verify-tint:   #F2772F;
+  --resolve-tint:  #3FB874;
+  --execute-tint:  #C564C4;
+
+  /* ── Border / Stroke ────────────────────────────────── */
+  --border-weight: 1.4px;
+  --border-color:  #0D0D0C;
+
+  /* ── Radius ─────────────────────────────────────────── */
+  --radius-btn:    7px;
+  --radius-pill:   100px;
+
+  /* ── Scale Unit (desktop overridden via JS/media) ───── */
+  --u: 1px;
+
+  /* ── Z-Index ────────────────────────────────────────── */
+  --z-nav:         100;
+  --z-grain:       10;
+  --z-hero-content: 20;
+}
+
+/* Desktop fluid unit */
+@media (min-width: 761px) {
+  :root {
+    --u: min(calc(100vw / 1440), calc(100vh / 960));
+  }
+}
+
+/* ── Reset ──────────────────────────────────────────────── */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  scroll-behavior: smooth;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  font-family: var(--font-primary);
+  background: var(--surface-cream);
+  color: var(--ink-primary);
+  overflow-x: hidden;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+  border: none;
+  background: none;
+}

@@ -20,6 +20,13 @@ Usage:
   POST /api/demo/load-meeting-1 — loads Meeting 1 only
   POST /api/demo/load-meeting-2 — loads Meeting 2 only (requires Meeting 1 approved first)
 """
+import datetime
+
+# Dynamic demo deadline helpers (ensures active reminders within 24-36h from current date)
+_today = datetime.date.today()
+DEMO_OVERDUE_3D = (_today - datetime.timedelta(days=3)).isoformat()
+DEMO_DUE_TOMORROW = (_today + datetime.timedelta(days=1)).isoformat()
+DEMO_DUE_IN_4D = (_today + datetime.timedelta(days=4)).isoformat()
 
 MEETING_1_TITLE = "Sprint 14 Kickoff - Nov 14"
 MEETING_1_DATE = "2024-11-14"
@@ -172,7 +179,7 @@ MEETING_1_ACTION_ITEMS = [
         "title": "Design and implement PostgreSQL database schema migrations",
         "description": "Design the initial PostgreSQL database schema including all tables for user management, billing module, and core entities. Write SQLAlchemy migration scripts.",
         "owner": "Marcus",
-        "deadline_iso": "2024-11-18",
+        "deadline_iso": DEMO_OVERDUE_3D,
         "deadline_raw": "November 18th",
         "priority": "HIGH",
         "depends_on_task_title": None,
@@ -185,7 +192,7 @@ MEETING_1_ACTION_ITEMS = [
         "title": "Build REST API endpoints for user management module",
         "description": "Implement the full REST API layer for user management including authentication, profile management, and permissions. Must follow the finalized PostgreSQL schema.",
         "owner": "Marcus",
-        "deadline_iso": "2024-11-22",
+        "deadline_iso": DEMO_DUE_TOMORROW,
         "deadline_raw": "November 22nd",
         "priority": "HIGH",
         "depends_on_task_title": "Design and implement PostgreSQL database schema migrations",
@@ -198,7 +205,7 @@ MEETING_1_ACTION_ITEMS = [
         "title": "Build user dashboard frontend",
         "description": "Design and implement the user-facing dashboard UI with all sprint 14 features. Dependent on user management API being available.",
         "owner": "Priya",
-        "deadline_iso": "2024-11-26",
+        "deadline_iso": DEMO_DUE_TOMORROW,
         "deadline_raw": "November 26th",
         "priority": "HIGH",
         "depends_on_task_title": "Build REST API endpoints for user management module",
@@ -211,7 +218,7 @@ MEETING_1_ACTION_ITEMS = [
         "title": "Set up end-to-end test suite",
         "description": "Create a comprehensive end-to-end test suite covering all critical user flows before the November 29th launch.",
         "owner": "Tom",
-        "deadline_iso": "2024-11-25",
+        "deadline_iso": DEMO_DUE_IN_4D,
         "deadline_raw": "November 25th",
         "priority": "HIGH",
         "depends_on_task_title": None,

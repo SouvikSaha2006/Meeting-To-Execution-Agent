@@ -59,12 +59,13 @@ from backend.agent_pipeline import (
 )
 from backend.database import get_db, init_db
 from backend.integrations import (
+    dispatch_deadline_reminder,
     dispatch_execution,
     dispatch_nudge,
     github_status,
     webhook_status,
 )
-from backend.models import Decision, ExecutionTask, Meeting, StagingItem
+from backend.models import Decision, ExecutionTask, Meeting, ReminderLog, StagingItem
 from backend.schemas import (
     AgentTraceStep,
     AnalyticsHealthResponse,
@@ -72,6 +73,7 @@ from backend.schemas import (
     BlastRadiusReport,
     BulkApproveResponse,
     DecisionResponse,
+    DispatchRemindersResponse,
     ExecutionTaskResponse,
     HealthResponse,
     IngestResponse,
@@ -81,11 +83,14 @@ from backend.schemas import (
     MeetingIngestRequest,
     MeetingResponse,
     RejectItemRequest,
+    ReminderLogResponse,
     ResolveItemRequest,
     SendNudgeRequest,
     SendNudgeResponse,
     StagingItemResponse,
     StaleCommitment,
+    UpcomingReminderItem,
+    UpcomingRemindersResponse,
     UpdateTaskStatusRequest,
     WeeklyDigestOwner,
     WeeklyDigestResponse,
@@ -201,6 +206,7 @@ def _task_to_resp(t: ExecutionTask) -> ExecutionTaskResponse:
         nudge_draft=t.nudge_draft,
         nudged=t.nudged if hasattr(t, "nudged") else False,
         nudge_receipt_json=t.nudge_receipt_json,
+        reminder_sent=t.reminder_sent if hasattr(t, "reminder_sent") else False,
         approved_at=t.approved_at,
     )
 
@@ -588,6 +594,10 @@ async def demo_seed(db: AsyncSession = Depends(get_db)):
             "6": "GET /api/analytics/health for execution velocity, readiness trend & stale watchdog",
             "7": "GET /api/graph/lineage for the connected 10+ node decision & dependency graph",
             "8": "GET /api/digest/weekly for the full weekly execution digest",
+            "9": "GET /api/reminders/upcoming?within_hours=48 to scan proactive deadline reminders for tasks due within 24-36h",
+            "10": "POST /api/reminders/dispatch-all to dispatch upcoming reminders to webhook/Slack and log receipts",
+            "11": "POST /api/reminders/{task_id}/send to send an immediate reminder for a single task",
+            "12": "GET /api/reminders/logs to inspect all dispatched deadline reminder logs",
         },
     }
 
@@ -1190,6 +1200,251 @@ async def get_lineage_graph(
     and execution tasks into a connected lineage graph.
     """
     return await build_lineage_graph(db, filter_meeting_id=meeting_id)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Proactive Deadline Reminder Engine
+# ═══════════════════════════════════════════════════════════════════════════════
+def _compute_task_hours_remaining(deadline_iso: str, now: datetime.datetime) -> int:
+    try:
+        task_date = datetime.date.fromisoformat(deadline_iso)
+        task_dt = datetime.datetime(
+            task_date.year, task_date.month, task_date.day, 23, 59, 59, tzinfo=datetime.timezone.utc
+        )
+        diff = task_dt - now
+        return int(diff.total_seconds() / 3600)
+    except Exception:
+        return 9999
+
+
+async def scan_upcoming_reminders(
+    db: AsyncSession, within_hours: int = 48
+) -> list[UpcomingReminderItem]:
+    stmt = (
+        select(ExecutionTask)
+        .where(ExecutionTask.status != "DONE")
+        .where(ExecutionTask.deadline_iso.is_not(None))
+    )
+    tasks = (await db.execute(stmt)).scalars().all()
+    now = datetime.datetime.now(datetime.timezone.utc)
+
+    items: list[UpcomingReminderItem] = []
+    for t in tasks:
+        if not t.deadline_iso:
+            continue
+        hours = _compute_task_hours_remaining(t.deadline_iso, now)
+        if hours <= within_hours:
+            if hours < 0:
+                urgency = "OVERDUE"
+                msg = (
+                    f"Hi @{t.owner or 'team'}, '{t.title}' was due on {t.deadline_iso} "
+                    f"and is currently {abs(hours)}h overdue. Please post a status update."
+                )
+            elif hours <= 24:
+                urgency = "CRITICAL_DUE_SOON"
+                msg = (
+                    f"Hi @{t.owner or 'team'}, urgent reminder: '{t.title}' is due in "
+                    f"{hours}h (deadline: {t.deadline_iso}). Please ensure completion or flag blockers."
+                )
+            else:
+                urgency = "UPCOMING"
+                msg = (
+                    f"Hi @{t.owner or 'team'}, reminder: '{t.title}' is due in "
+                    f"{hours}h (deadline: {t.deadline_iso})."
+                )
+
+            items.append(
+                UpcomingReminderItem(
+                    task_id=t.id,
+                    task_title=t.title,
+                    owner=t.owner,
+                    deadline_iso=t.deadline_iso,
+                    hours_remaining=hours,
+                    urgency=urgency,
+                    reminder_sent=bool(t.reminder_sent),
+                    suggested_message=msg,
+                )
+            )
+
+    items.sort(key=lambda x: x.hours_remaining)
+    return items
+
+
+@app.get("/api/reminders/upcoming", response_model=UpcomingRemindersResponse, tags=["Reminders"])
+async def get_upcoming_reminders(
+    within_hours: int = Query(default=48, ge=1, le=168, description="Horizon in hours to scan for deadlines"),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Scans all active tasks and returns personalized upcoming deadline reminders
+    for tasks due within the specified horizon.
+    """
+    reminders = await scan_upcoming_reminders(db, within_hours=within_hours)
+    return UpcomingRemindersResponse(
+        scanned_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        within_hours=within_hours,
+        upcoming_count=len(reminders),
+        reminders=reminders,
+    )
+
+
+@app.post("/api/reminders/scan", response_model=UpcomingRemindersResponse, tags=["Reminders"])
+async def post_scan_reminders(
+    within_hours: int = Query(default=48, ge=1, le=168, description="Horizon in hours to scan for deadlines"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Scan and return upcoming deadline reminders (POST interface)."""
+    reminders = await scan_upcoming_reminders(db, within_hours=within_hours)
+    return UpcomingRemindersResponse(
+        scanned_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        within_hours=within_hours,
+        upcoming_count=len(reminders),
+        reminders=reminders,
+    )
+
+
+@app.post("/api/reminders/dispatch-all", response_model=DispatchRemindersResponse, tags=["Reminders"])
+async def dispatch_all_reminders(
+    within_hours: int = Query(default=48, ge=1, le=168),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Dispatches proactive deadline reminders to webhook/Slack for all upcoming-deadline
+    tasks that haven't been reminded yet, and records receipts into reminder_logs.
+    """
+    reminders = await scan_upcoming_reminders(db, within_hours=within_hours)
+    dispatched_logs: list[ReminderLogResponse] = []
+    skipped = 0
+
+    for r in reminders:
+        task = await db.get(ExecutionTask, r.task_id)
+        if not task:
+            continue
+        if task.reminder_sent:
+            skipped += 1
+            continue
+
+        await dispatch_deadline_reminder(
+            owner=r.owner or "team",
+            task_title=r.task_title,
+            deadline_iso=r.deadline_iso,
+            hours_remaining=r.hours_remaining,
+            message=r.suggested_message,
+            channel="webhook",
+        )
+
+        log_entry = ReminderLog(
+            task_id=task.id,
+            owner=task.owner,
+            task_title=task.title,
+            deadline_iso=task.deadline_iso,
+            hours_remaining=r.hours_remaining,
+            channel="webhook",
+            message=r.suggested_message,
+        )
+        db.add(log_entry)
+        task.reminder_sent = True
+        await db.flush()
+
+        dispatched_logs.append(
+            ReminderLogResponse(
+                id=log_entry.id,
+                task_id=log_entry.task_id,
+                owner=log_entry.owner,
+                task_title=log_entry.task_title,
+                deadline_iso=log_entry.deadline_iso,
+                hours_remaining=log_entry.hours_remaining,
+                channel=log_entry.channel,
+                message=log_entry.message,
+                sent_at=log_entry.sent_at,
+            )
+        )
+
+    return DispatchRemindersResponse(
+        dispatched_count=len(dispatched_logs),
+        skipped_count=skipped,
+        reminders=dispatched_logs,
+    )
+
+
+@app.post("/api/reminders/{task_id}/send", response_model=ReminderLogResponse, tags=["Reminders"])
+async def send_single_reminder(
+    task_id: int,
+    channel: str = Query(default="webhook"),
+    custom_message: Optional[str] = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Sends an immediate proactive deadline reminder for a specific task."""
+    task = await db.get(ExecutionTask, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    hours = _compute_task_hours_remaining(task.deadline_iso, now) if task.deadline_iso else 0
+
+    msg = custom_message or (
+        f"Hi @{task.owner or 'team'}, deadline alert: '{task.title}' is due "
+        + (f"in {hours}h ({task.deadline_iso})" if hours >= 0 else f"{abs(hours)}h overdue ({task.deadline_iso})")
+        + ". Please ensure progress is updated."
+    )
+
+    await dispatch_deadline_reminder(
+        owner=task.owner or "team",
+        task_title=task.title,
+        deadline_iso=task.deadline_iso or "TBD",
+        hours_remaining=hours,
+        message=msg,
+        channel=channel,
+    )
+
+    log_entry = ReminderLog(
+        task_id=task.id,
+        owner=task.owner,
+        task_title=task.title,
+        deadline_iso=task.deadline_iso,
+        hours_remaining=hours,
+        channel=channel,
+        message=msg,
+    )
+    db.add(log_entry)
+    task.reminder_sent = True
+    await db.flush()
+
+    return ReminderLogResponse(
+        id=log_entry.id,
+        task_id=log_entry.task_id,
+        owner=log_entry.owner,
+        task_title=log_entry.task_title,
+        deadline_iso=log_entry.deadline_iso,
+        hours_remaining=log_entry.hours_remaining,
+        channel=log_entry.channel,
+        message=log_entry.message,
+        sent_at=log_entry.sent_at,
+    )
+
+
+@app.get("/api/reminders/logs", response_model=List[ReminderLogResponse], tags=["Reminders"])
+async def list_reminder_logs(
+    limit: int = Query(default=50, ge=1, le=500),
+    db: AsyncSession = Depends(get_db),
+):
+    """List all logged deadline reminders."""
+    stmt = select(ReminderLog).order_by(ReminderLog.sent_at.desc()).limit(limit)
+    logs = (await db.execute(stmt)).scalars().all()
+    return [
+        ReminderLogResponse(
+            id=l.id,
+            task_id=l.task_id,
+            owner=l.owner,
+            task_title=l.task_title,
+            deadline_iso=l.deadline_iso,
+            hours_remaining=l.hours_remaining,
+            channel=l.channel,
+            message=l.message,
+            sent_at=l.sent_at,
+        )
+        for l in logs
+    ]
 
 
 if __name__ == "__main__":

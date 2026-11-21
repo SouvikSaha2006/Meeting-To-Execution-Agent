@@ -275,6 +275,74 @@ async def dispatch_nudge(
     return receipt
 
 
+# ── Deadline Reminder Dispatcher ──────────────────────────────────────────────
+async def dispatch_deadline_reminder(
+    owner: str,
+    task_title: str,
+    deadline_iso: str,
+    hours_remaining: int,
+    message: str,
+    channel: str = "webhook",
+) -> dict[str, Any]:
+    """
+    Dispatches a proactive deadline reminder notification via Slack, Discord, or Webhook.
+    """
+    dispatched_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    msg_id = f"reminder-{int(datetime.datetime.now().timestamp())}"
+    
+    url = os.getenv("WEBHOOK_URL", "") or WEBHOOK_URL
+    webhook_dispatched = False
+    webhook_error = None
+
+    if url:
+        try:
+            payload = {
+                "text": f"⏰ *Deadline Reminder:* {task_title}",
+                "attachments": [
+                    {
+                        "color": "#e01e5a" if hours_remaining <= 24 else "#ecb22e",
+                        "fields": [
+                            {"title": "Assignee", "value": owner or "Unassigned", "short": True},
+                            {"title": "Hours Remaining", "value": f"{hours_remaining}h", "short": True},
+                            {"title": "Deadline", "value": deadline_iso, "short": True},
+                            {"title": "Message", "value": message, "short": False},
+                        ],
+                        "footer": "Proactive Deadline Reminder Engine",
+                    }
+                ],
+            }
+            async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+                resp = await client.post(url, json=payload)
+                if resp.status_code in (200, 201, 204):
+                    webhook_dispatched = True
+                else:
+                    webhook_error = f"Webhook status {resp.status_code}"
+        except Exception as e:
+            webhook_error = str(e)
+
+    receipt = {
+        "message_id": msg_id,
+        "owner": owner,
+        "task_title": task_title,
+        "deadline_iso": deadline_iso,
+        "hours_remaining": hours_remaining,
+        "channel": channel,
+        "status": "delivered" if (webhook_dispatched or not url) else "failed",
+        "webhook_dispatched": webhook_dispatched,
+        "webhook_error": webhook_error,
+        "dispatched_at": dispatched_at,
+    }
+
+    logger.info(
+        "[DEADLINE REMINDER DISPATCHED] Task: '%s' | Owner: %s | Hours Remaining: %sh | Channel: %s",
+        task_title,
+        owner,
+        hours_remaining,
+        channel,
+    )
+    return receipt
+
+
 # ── Health check helpers ──────────────────────────────────────────────────────
 def github_status() -> str:
     if GITHUB_TOKEN and GITHUB_REPO:

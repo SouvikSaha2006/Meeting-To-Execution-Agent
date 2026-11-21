@@ -81,6 +81,7 @@ async def init_db() -> None:
                 ("execution_tasks", "nudge_draft", "TEXT"),
                 ("execution_tasks", "nudged", "BOOLEAN DEFAULT 0"),
                 ("execution_tasks", "nudge_receipt_json", "TEXT"),
+                ("execution_tasks", "reminder_sent", "BOOLEAN DEFAULT 0"),
             ]
             for tbl, col, col_type in migrations:
                 try:

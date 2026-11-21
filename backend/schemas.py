@@ -295,6 +295,7 @@ class ExecutionTaskResponse(BaseModel):
     nudge_draft: Optional[str] = None
     nudged: bool = False
     nudge_receipt_json: Optional[str] = None
+    reminder_sent: bool = False
     approved_at: Optional[datetime.datetime]
 
 
@@ -367,3 +368,42 @@ class WeeklyDigestResponse(BaseModel):
     period: str
     owners: List[WeeklyDigestOwner]
     markdown: str
+
+
+# ── Proactive Deadline Reminder Engine Schemas ────────────────────────────────
+class UpcomingReminderItem(BaseModel):
+    task_id: int
+    task_title: str
+    owner: Optional[str] = None
+    deadline_iso: str
+    hours_remaining: int
+    urgency: Literal["OVERDUE", "CRITICAL_DUE_SOON", "UPCOMING"]
+    reminder_sent: bool
+    suggested_message: str
+
+
+class UpcomingRemindersResponse(BaseModel):
+    scanned_at: str
+    within_hours: int
+    upcoming_count: int
+    reminders: List[UpcomingReminderItem]
+
+
+class ReminderLogResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    task_id: int
+    owner: Optional[str] = None
+    task_title: str
+    deadline_iso: Optional[str] = None
+    hours_remaining: int
+    channel: str
+    message: str
+    sent_at: datetime.datetime
+
+
+class DispatchRemindersResponse(BaseModel):
+    dispatched_count: int
+    skipped_count: int
+    reminders: List[ReminderLogResponse]

@@ -208,6 +208,9 @@ class ExecutionTask(Base):
     nudge_receipt_json: Mapped[Optional[str]] = mapped_column(
         Text, nullable=True, comment="Dispatch delivery receipt for nudge"
     )
+    reminder_sent: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False, server_default="0", comment="Whether deadline reminder has been dispatched"
+    )
     approved_at: Mapped[Optional[datetime.datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -220,6 +223,34 @@ class ExecutionTask(Base):
     depends_on: Mapped[Optional["ExecutionTask"]] = relationship(
         "ExecutionTask", remote_side="ExecutionTask.id", foreign_keys=[depends_on_id]
     )
+    reminders: Mapped[list["ReminderLog"]] = relationship(
+        "ReminderLog", back_populates="task", cascade="all, delete-orphan"
+    )
 
     def __repr__(self) -> str:
         return f"<ExecutionTask id={self.id} title={self.title!r} status={self.status}>"
+
+
+# ── ReminderLog ───────────────────────────────────────────────────────────────
+class ReminderLog(Base):
+    __tablename__ = "reminder_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    task_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("execution_tasks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    owner: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    task_title: Mapped[str] = mapped_column(String(512), nullable=False)
+    deadline_iso: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    hours_remaining: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    channel: Mapped[str] = mapped_column(String(64), nullable=False, default="webhook")
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    sent_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, server_default=func.now()
+    )
+
+    # Relationships
+    task: Mapped["ExecutionTask"] = relationship("ExecutionTask", back_populates="reminders")
+
+    def __repr__(self) -> str:
+        return f"<ReminderLog id={self.id} task_id={self.task_id} owner={self.owner}>"

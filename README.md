@@ -36,9 +36,9 @@ VeriFlow delivers 100% end-to-end backend and frontend implementation for every 
 ## 3. Standout Agentic USPs & Innovations
 
 ### 1. Counterfactual Blast-Radius Analyzer (`analyze_blast_radius`)
-When a cross-meeting conflict occurs (e.g., changing from PostgreSQL to MongoDB or moving launch from Nov 29 to Nov 22), VeriFlow runs an impact simulation against all active database tasks:
+When a cross-meeting conflict occurs (e.g., changing from PostgreSQL to MongoDB or moving launch from Nov 29 to Nov 22), VeriFlow runs an impact simulation against all active database tasks in SQLite (`ExecutionTask` and `StagingItem`):
 - **Risk Level:** `LOW`, `MEDIUM`, `HIGH`, or `CRITICAL`
-- **Impacted Downstream Tasks:** Specific tasks blocked or delayed
+- **Impacted Downstream Tasks:** Specific live database tasks blocked or delayed (evaluated by keyword, ownership, and subsystem impact)
 - **Estimated Delay:** Calculated slip in days
 - **Mitigation Suggestion:** AI-synthesized actionable recommendation (e.g., *"Freeze secondary scope and apply mocked JSON contracts so downstream teams can proceed without waiting on schema refactoring."*)
 - **Endpoint:** `GET /api/staging/{id}/blast-radius`
@@ -61,14 +61,22 @@ Transforms all historical meetings, decisions, staged conflicts, and execution t
 Generates polite, quote-backed nudges for blockers or stale commitments and dispatches via Webhook/Slack with logged receipts.
 - **Endpoint:** `POST /api/actions/send-nudge`
 
-### 6. Conversational Memory Copilot (`POST /api/memory/ask`)
-Allows stakeholders to ask questions across meetings in natural language (e.g. *"What database did we decide to use?"* or *"When is the product launch?"*). VeriFlow strictly cites exact sources (`meeting_title`, `meeting_date`, `speaker`, `verbatim_quote`). If unrecorded, it deterministically responds *"Not found in recorded meeting memory"* with zero hallucinations.
+### 6. Dynamic Conversational Memory Copilot (`POST /api/memory/ask`)
+Allows stakeholders to ask natural language questions across all recorded meetings (e.g. *"What database did we decide to use?"*, *"What tasks is Souvik working on?"*, or *"Why did our launch date change?"*).
+- **Dual Before/After Conflict Citations:** When decisions conflict or supersede previous ones, returns grounded citations linking both the original decision and the revision with exact speaker names, meeting dates, and verbatim quotes.
+- **Zero Canned Answers:** Real-time synthesis directly from SQLite tables (`meetings`, `decisions`, `execution_tasks`, `staging_items`) supporting any team member names (`Souvik`, `Manas`, or arbitrary participants).
+- **Strict Grounding:** If a requested fact is not in recorded memory, it deterministically responds *"Not found in recorded meeting memory"* with zero hallucinations.
+
+### 7. Universal Name-Agnostic Extraction & Dynamic Speaker Discovery
+- **Multi-Format Parsing:** Ingests any standard meeting export format: bracketed (`[Souvik (Lead)]: ...`), plain colon (`Manas: ...`), markdown bold (`**Riya:** ...`), and timestamps (`[10:15 AM] Alex: ...`).
+- **Dynamic Commitment Attribution:** Automatically binds first-person commitments (*"I will...", "I'll...", "my task is..."*) to the active speaker, and directed assignments (*"Souvik, please handle the API..."*) to the designated owner without relying on hardcoded name allowlists.
+- **Dynamic Live Mic Pills:** Discovers speakers directly from transcript content to dynamically populate the Live Dictation pills in real time.
 
 ---
 
 ## 4. Live Voice Dictation & Browser Compatibility
 
-VeriFlow features a **Live Dictate Meeting** mic directly inside Tab 1 with a quick speaker selector pill (`Sarah (PM)`, `Rohan (Backend)`, `Ananya (Design)`), automatically prefixing lines as `[Speaker]: ...` in real time so judges can dictate conflicting decisions out loud and immediately hit *"Run Agent Pipeline"*.
+VeriFlow features a **Live Dictate Meeting** mic directly inside Tab 1 with dynamic speaker selector pills (e.g. `Souvik`, `Manas`, or any speaker detected in the meeting), automatically prefixing lines as `[Speaker]: ...` in real time so judges can dictate conflicting decisions out loud and immediately hit *"Run Agent Pipeline"*.
 
 > ### ⚠️ Browser Compatibility Note
 > The **Live Dictate Meeting** microphone feature relies on the browser's Web Speech API (`SpeechRecognition`) and **works in Google Chrome and other supporting Chromium browsers only**.  
@@ -108,6 +116,10 @@ Step 5: Test Conversational Memory & Reminders.
           Inspect the live directed graph showing conflicts and supersedes relationships.
 ```
 
+> **💡 Real-Time Custom Transcript Testing:**  
+> Want to test with your own custom meeting transcript and team names (e.g., `Souvik` & `Manas`)?  
+> Click **"Reset Demo"** in the top bar (or call `POST /api/demo/reset`) to completely wipe the SQLite workspace to `0` records. Then paste, upload, or dictate your meeting in Tab 1—VeriFlow runs 100% in real time on your participants with zero pre-seeded clutter.
+
 ---
 
 ## 6. Architecture & Tech Stack
@@ -134,7 +146,7 @@ Step 5: Test Conversational Memory & Reminders.
    ┌───────────────────────────────▼───────────────────────────────┐
    │                   SQLite (aiosqlite) DB                       │
    │     meetings • decisions • staging_items • execution_tasks    │
-   │               reminder_logs • auto-seed on startup            │
+   │       reminder_logs • zero pre-seeded clutter (instant reset) │
    └───────────────────────────────────────────────────────────────┘
 ```
 
@@ -247,7 +259,8 @@ npm run dev
 | `GET` | `/api/reminders/upcoming` | Scan for execution tasks with deadlines due within `<48h`. |
 | `POST` | `/api/reminders/dispatch-all` | Trigger automated pre-deadline reminders across owners. |
 | `POST` | `/api/memory/ask` | Natural language conversational query over cross-meeting decisions & transcripts. |
-| `POST` | `/api/demo/seed` | 1-click database reset and demo scenario preloader. |
+| `POST` | `/api/demo/seed` | Preload structured demo scenarios (Sprint Kickoff / Tech Sync). |
+| `POST` | `/api/demo/reset` | Complete workspace hard-reset: wipes all tables to 0 records. |
 
 ---
 

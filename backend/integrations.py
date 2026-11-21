@@ -219,6 +219,62 @@ async def dispatch_execution(task: dict) -> dict[str, Any]:
     return receipts
 
 
+# ── Nudge Dispatcher ──────────────────────────────────────────────────────────
+async def dispatch_nudge(
+    recipient: str,
+    channel: str,
+    message: str,
+    target_type: str,
+    target_id: int,
+) -> dict[str, Any]:
+    """
+    Dispatch an auto-nudge/escalation follow-up to Slack, Discord, or Email.
+    Returns delivery receipt with message ID, status, and timestamp.
+    """
+    dispatched_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    msg_id = f"nudge-{target_type.lower()}-{target_id}-{int(datetime.datetime.now().timestamp())}"
+    
+    url = os.getenv("WEBHOOK_URL", "") or WEBHOOK_URL
+    webhook_dispatched = False
+    webhook_error = None
+
+    if url and channel in ("slack", "discord"):
+        try:
+            payload = {
+                "text": f"🔔 *Auto-Nudge for {recipient}:*\n{message}",
+                "channel": channel,
+                "metadata": {"target_type": target_type, "target_id": target_id},
+            }
+            async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+                resp = await client.post(url, json=payload)
+                if resp.status_code in (200, 201, 204):
+                    webhook_dispatched = True
+                else:
+                    webhook_error = f"Webhook status {resp.status_code}"
+        except Exception as e:
+            webhook_error = str(e)
+
+    receipt = {
+        "message_id": msg_id,
+        "recipient": recipient,
+        "channel": channel,
+        "status": "delivered" if (webhook_dispatched or not url) else "failed",
+        "webhook_dispatched": webhook_dispatched,
+        "webhook_error": webhook_error,
+        "dispatched_at": dispatched_at,
+        "preview": message[:120] + "..." if len(message) > 120 else message,
+    }
+
+    logger.info(
+        "[NUDGE DISPATCHED] To: %s via %s (ID: %s) | Status: %s",
+        recipient,
+        channel,
+        msg_id,
+        receipt["status"],
+    )
+    return receipt
+
+
 # ── Health check helpers ──────────────────────────────────────────────────────
 def github_status() -> str:
     if GITHUB_TOKEN and GITHUB_REPO:

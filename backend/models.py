@@ -14,6 +14,7 @@ import datetime
 from typing import Optional
 
 from sqlalchemy import (
+    Boolean,
     DateTime,
     ForeignKey,
     Integer,
@@ -43,6 +44,12 @@ class Meeting(Base):
     raw_transcript: Mapped[str] = mapped_column(Text, nullable=False)
     agent_trace_json: Mapped[Optional[str]] = mapped_column(
         Text, nullable=True, comment="JSON array of AgentTraceStep objects"
+    )
+    readiness_score: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True, default=100, comment="Deterministic readiness score 0-100"
+    )
+    score_breakdown_json: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True, comment="JSON breakdown of score deductions"
     )
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), default=_now, server_default=func.now()
@@ -134,6 +141,18 @@ class StagingItem(Base):
     clarification_prompt: Mapped[Optional[str]] = mapped_column(
         Text, nullable=True, comment="Human-readable prompt for missing info"
     )
+    blast_radius_json: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True, comment="Counterfactual blast radius simulation JSON"
+    )
+    nudge_draft: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True, comment="Polite quote-backed follow-up nudge draft"
+    )
+    nudged: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False, server_default="0", comment="Whether a nudge has been sent"
+    )
+    nudge_receipt_json: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True, comment="Dispatch delivery receipt for nudge"
+    )
     verbatim_quote: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     rejection_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime.datetime] = mapped_column(
@@ -179,6 +198,15 @@ class ExecutionTask(Base):
     )
     external_execution_receipt_json: Mapped[Optional[str]] = mapped_column(
         Text, nullable=True, comment="JSON receipt from GitHub / Webhook dispatcher"
+    )
+    nudge_draft: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True, comment="Polite quote-backed follow-up nudge draft"
+    )
+    nudged: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False, server_default="0", comment="Whether a nudge has been sent"
+    )
+    nudge_receipt_json: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True, comment="Dispatch delivery receipt for nudge"
     )
     approved_at: Mapped[Optional[datetime.datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True

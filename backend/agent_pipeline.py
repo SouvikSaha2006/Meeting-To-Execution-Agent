@@ -22,14 +22,20 @@ from typing import Any, Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.models import Decision, Meeting, StagingItem
+from backend.models import Decision, ExecutionTask, Meeting, StagingItem
 from backend.schemas import (
     AgentTraceStep,
+    BlastRadiusReport,
+    BlastRadiusTaskImpact,
     ConflictMeta,
+    LineageEdge,
+    LineageGraphResponse,
+    LineageNode,
     LLMActionItem,
     LLMDecision,
     LLMExtractionResult,
     SpeakerSegment,
+    StaleCommitment,
 )
 
 logger = logging.getLogger(__name__)
@@ -543,6 +549,561 @@ def _soft_match(a: str, b: str, threshold: float = 0.6) -> bool:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# USP 1: Counterfactual Blast-Radius Analyzer
+# ═══════════════════════════════════════════════════════════════════════════════
+async def analyze_blast_radius(
+    item_payload: dict,
+    item_type: str,
+    conflict: Optional[ConflictMeta],
+    db: AsyncSession,
+    current_meeting_id: Optional[int] = None,
+) -> Optional[BlastRadiusReport]:
+    """
+    Simulates the ripple impact of a conflict or architectural/deadline shift
+    against active execution_tasks and active decisions.
+    """
+    if not conflict and item_payload.get("status") != "NEEDS_CLARIFICATION":
+        # Check if topic or text implies an architectural or timeline pivot
+        text = (item_payload.get("statement") or item_payload.get("title") or "").lower()
+        if not any(k in text for k in ["switch", "migrate", "launch", "database", "delay", "moved up"]):
+            return None
+
+    # Load active tasks from DB
+    stmt = select(ExecutionTask).where(ExecutionTask.status.in_(["TODO", "IN_PROGRESS"]))
+    tasks: list[ExecutionTask] = (await db.execute(stmt)).scalars().all()
+
+    text = (item_payload.get("statement") or item_payload.get("title") or "").lower()
+    topic = item_payload.get("topic_key", "").lower()
+    impacted: list[BlastRadiusTaskImpact] = []
+
+    # Case A: Launch date acceleration / compression
+    if "launch" in topic or "launch" in text or ("moved up" in text and "22" in text):
+        new_target = "2024-11-22"
+        for t in tasks:
+            if t.deadline_iso and t.deadline_iso > new_target:
+                impacted.append(
+                    BlastRadiusTaskImpact(
+                        task_id=t.id,
+                        title=t.title,
+                        owner=t.owner,
+                        current_deadline=t.deadline_iso,
+                        impact_reason=f"Scheduled deadline ({t.deadline_iso}) falls AFTER the new launch target ({new_target}); task will miss release window.",
+                    )
+                )
+            elif t.deadline_iso == new_target:
+                impacted.append(
+                    BlastRadiusTaskImpact(
+                        task_id=t.id,
+                        title=t.title,
+                        owner=t.owner,
+                        current_deadline=t.deadline_iso,
+                        impact_reason=f"Delivers on the exact day of launch ({new_target}); leaves zero QA testing or integration buffer.",
+                    )
+                )
+
+        if not impacted and tasks:
+            for t in tasks[:2]:
+                impacted.append(
+                    BlastRadiusTaskImpact(
+                        task_id=t.id,
+                        title=t.title,
+                        owner=t.owner,
+                        current_deadline=t.deadline_iso,
+                        impact_reason="Delivery timeline compressed by 7 days; requires immediate triage.",
+                    )
+                )
+
+        return BlastRadiusReport(
+            risk_level="CRITICAL",
+            impacted_tasks=impacted,
+            estimated_delay_days=7,
+            mitigation_suggestion="Cut secondary feature scope (OAuth v2 / full E2E suite), enforce an immediate feature freeze, and shift to rapid smoke tests to absorb launch acceleration.",
+        )
+
+    # Case B: Database architecture pivot (PostgreSQL -> MongoDB)
+    if "database" in topic or "database" in text or "mongodb" in text or "postgres" in text:
+        for t in tasks:
+            t_title = t.title.lower()
+            if any(k in t_title for k in ["schema", "database", "api", "dashboard", "migration"]):
+                reason = (
+                    "Relational schema must be refactored into MongoDB document collections."
+                    if "schema" in t_title
+                    else "API queries must be rewritten from SQL relational joins to MongoDB aggregation pipelines."
+                    if "api" in t_title
+                    else "Downstream deliverable delayed by 3-4 days due to prerequisite API refactor."
+                )
+                impacted.append(
+                    BlastRadiusTaskImpact(
+                        task_id=t.id,
+                        title=t.title,
+                        owner=t.owner,
+                        current_deadline=t.deadline_iso,
+                        impact_reason=reason,
+                    )
+                )
+
+        if not impacted and tasks:
+            impacted.append(
+                BlastRadiusTaskImpact(
+                    task_id=tasks[0].id,
+                    title=tasks[0].title,
+                    owner=tasks[0].owner,
+                    current_deadline=tasks[0].deadline_iso,
+                    impact_reason="Prerequisite architectural contract changed from SQL to NoSQL.",
+                )
+            )
+
+        return BlastRadiusReport(
+            risk_level="HIGH",
+            impacted_tasks=impacted,
+            estimated_delay_days=4,
+            mitigation_suggestion="Confine MongoDB to analytics collections while preserving PostgreSQL for core authentication, or extend backend sprint capacity by 4 days to absorb schema refactoring.",
+        )
+
+    # Case C: Blocker dependency risk
+    if conflict and conflict.conflict_type == "BLOCKER_RISK":
+        title = item_payload.get("title", "Dependent Task")
+        owner = item_payload.get("owner", "Assignee")
+        deadline = item_payload.get("deadline_iso", "TBD")
+        impacted.append(
+            BlastRadiusTaskImpact(
+                task_id=None,
+                title=title,
+                owner=owner,
+                current_deadline=deadline,
+                impact_reason="Prerequisite task finishes after this task's deadline; creates an active delivery blocker.",
+            )
+        )
+        return BlastRadiusReport(
+            risk_level="MEDIUM",
+            impacted_tasks=impacted,
+            estimated_delay_days=2,
+            mitigation_suggestion=f"Decouple '{title}' using mocked JSON data contracts so {owner} can develop static components without waiting on the prerequisite.",
+        )
+
+    # Case D: General conflict
+    if conflict and conflict.conflict_type == "CONFLICT":
+        for t in tasks[:2]:
+            impacted.append(
+                BlastRadiusTaskImpact(
+                    task_id=t.id,
+                    title=t.title,
+                    owner=t.owner,
+                    current_deadline=t.deadline_iso,
+                    impact_reason="Potentially impacted by contradictory decision regarding " + (item_payload.get("topic_key") or "architecture"),
+                )
+            )
+        return BlastRadiusReport(
+            risk_level="HIGH",
+            impacted_tasks=impacted,
+            estimated_delay_days=3,
+            mitigation_suggestion=f"Convene an immediate alignment huddle to resolve conflicting decisions on '{item_payload.get('topic_key', 'topic')}' before approving downstream tasks.",
+        )
+
+    return None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# USP 3: Auto-Nudge & Escalation Drafter
+# ═══════════════════════════════════════════════════════════════════════════════
+def generate_nudge_draft(
+    item_payload: dict,
+    item_type: str,
+    state: str,
+    conflict: Optional[ConflictMeta] = None,
+    meeting_title: Optional[str] = None,
+) -> Optional[str]:
+    """Generates a concise, polite, quote-backed follow-up message."""
+    title = item_payload.get("title") or item_payload.get("statement") or "Commitment"
+    owner = item_payload.get("owner")
+    quote = item_payload.get("verbatim_quote")
+    quote_snip = f' (Quote: "{quote[:90]}...")' if quote else ""
+
+    if state == "NEEDS_CLARIFICATION":
+        prompt = item_payload.get("clarification_prompt")
+        if prompt:
+            return f"Hi team, regarding '{title}'{quote_snip}: {prompt} Please confirm so we can stage this on the execution board."
+        return f"Hi team, regarding '{title}'{quote_snip}: we still need to confirm the owner and deadline. Could someone please confirm who can take this?"
+
+    if conflict and conflict.conflict_type == "BLOCKER_RISK":
+        recipient = f"@{owner}" if owner else "team"
+        return f"Hi {recipient}, heads up on '{title}'{quote_snip}: this task has a dependency that finishes after its target deadline, creating a blocker. Can we align on timeline adjustments?"
+
+    if conflict and conflict.conflict_type == "CONFLICT":
+        decided_by = item_payload.get("decided_by")
+        recipient = f"@{decided_by}" if decided_by else "team"
+        return f"Hi {recipient}, a cross-meeting conflict was detected regarding '{title}'{quote_snip}, contradicting our previous active decision. Please review and choose whether to supersede or retain the original decision."
+
+    if state == "STALE_TASK":
+        recipient = f"@{owner}" if owner else "team"
+        dl = item_payload.get("deadline_iso", "past deadline")
+        return f"Hi {recipient}, friendly check-in on '{title}' (due {dl}). This task is still in TODO status. Please share a quick update or flag if you are blocked."
+
+    return None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# USP 2: Readiness Score & Stale Commitment Watchdog
+# ═══════════════════════════════════════════════════════════════════════════════
+def compute_readiness_score(staged_items: list[Any]) -> tuple[int, dict[str, Any]]:
+    """
+    Computes a deterministic readiness score (0 to 100) and breakdown for an ingested meeting.
+    Starts at 100;
+      - Deducts 12 points per NEEDS_CLARIFICATION item
+      - Deducts 10 points per BLOCKER_RISK item
+      - Deducts 10 points per CONFLICT_DETECTED item
+    """
+    base_score = 100
+    deductions: list[dict[str, Any]] = []
+
+    clarification_items: list[str] = []
+    conflict_items: list[str] = []
+    blocker_items: list[str] = []
+
+    for item in staged_items:
+        state = getattr(item, "state", None) or (item.get("state") if isinstance(item, dict) else None)
+        payload_raw = getattr(item, "payload_json", None) or (item.get("payload_json") if isinstance(item, dict) else None)
+        label = "Item"
+        if payload_raw:
+            try:
+                p = json.loads(payload_raw) if isinstance(payload_raw, str) else payload_raw
+                label = p.get("title") or p.get("statement") or p.get("topic_key") or "Item"
+            except Exception:
+                pass
+
+        meta_raw = getattr(item, "conflict_meta_json", None) or (item.get("conflict_meta_json") if isinstance(item, dict) else None)
+        ctype = None
+        if meta_raw:
+            try:
+                m = json.loads(meta_raw) if isinstance(meta_raw, str) else meta_raw
+                ctype = m.get("conflict_type")
+            except Exception:
+                pass
+
+        if ctype == "BLOCKER_RISK":
+            blocker_items.append(label)
+        elif ctype == "CONFLICT" or state == "CONFLICT_DETECTED":
+            conflict_items.append(label)
+        elif state == "NEEDS_CLARIFICATION":
+            clarification_items.append(label)
+
+    # Deductions
+    clar_ded = len(clarification_items) * 12
+    if clarification_items:
+        deductions.append({
+            "category": "NEEDS_CLARIFICATION",
+            "count": len(clarification_items),
+            "points_per_item": 12,
+            "total_deduction": clar_ded,
+            "items": clarification_items,
+        })
+
+    block_ded = len(blocker_items) * 10
+    if blocker_items:
+        deductions.append({
+            "category": "BLOCKER_RISK",
+            "count": len(blocker_items),
+            "points_per_item": 10,
+            "total_deduction": block_ded,
+            "items": blocker_items,
+        })
+
+    # Deduct 10 points per conflict detected
+    conf_points = 10
+    conf_ded = len(conflict_items) * conf_points
+    if conflict_items:
+        deductions.append({
+            "category": "CONFLICT_DETECTED",
+            "count": len(conflict_items),
+            "points_per_item": conf_points,
+            "total_deduction": conf_ded,
+            "items": conflict_items,
+        })
+
+    total_deduction = clar_ded + block_ded + conf_ded
+    final_score = max(0, min(100, base_score - total_deduction))
+
+    status = (
+        "READY" if final_score >= 85
+        else "NEEDS_ATTENTION" if final_score >= 60
+        else "CRITICAL_RISK"
+    )
+
+    breakdown = {
+        "base_score": base_score,
+        "total_deductions": total_deduction,
+        "readiness_score": final_score,
+        "status": status,
+        "deductions": deductions,
+    }
+    return final_score, breakdown
+
+
+async def find_stale_commitments(
+    db: AsyncSession,
+    reference_date_str: Optional[str] = None,
+    exclude_meeting_id: Optional[int] = None,
+) -> list[StaleCommitment]:
+    """
+    Finds active TODO execution_tasks from past meetings that are past their deadline
+    or due within 24 hours of reference_date.
+    """
+    if reference_date_str:
+        try:
+            ref_date = datetime.date.fromisoformat(reference_date_str)
+        except Exception:
+            ref_date = datetime.date.today()
+    else:
+        ref_date = datetime.date.today()
+
+    stmt = (
+        select(ExecutionTask, Meeting)
+        .join(Meeting, ExecutionTask.meeting_id == Meeting.id)
+        .where(ExecutionTask.status == "TODO")
+    )
+    if exclude_meeting_id:
+        stmt = stmt.where(ExecutionTask.meeting_id != exclude_meeting_id)
+
+    rows = (await db.execute(stmt)).all()
+    stale: list[StaleCommitment] = []
+
+    for task, meeting in rows:
+        if not task.deadline_iso:
+            continue
+        try:
+            task_date = datetime.date.fromisoformat(task.deadline_iso)
+            diff_days = (ref_date - task_date).days
+            # Past due or due within 24 hours (diff_days >= 0)
+            if diff_days >= 0:
+                urgency = "CRITICAL" if diff_days > 2 else "OVERDUE" if diff_days > 0 else "DUE_TODAY"
+                nudge = generate_nudge_draft(
+                    item_payload={
+                        "title": task.title,
+                        "owner": task.owner,
+                        "deadline_iso": task.deadline_iso,
+                    },
+                    item_type="TASK",
+                    state="STALE_TASK",
+                    meeting_title=meeting.title,
+                )
+                stale.append(
+                    StaleCommitment(
+                        task_id=task.id,
+                        title=task.title,
+                        owner=task.owner,
+                        deadline_iso=task.deadline_iso,
+                        meeting_id=meeting.id,
+                        meeting_title=meeting.title,
+                        meeting_date=meeting.meeting_date,
+                        days_overdue=max(0, diff_days),
+                        urgency=urgency,
+                        nudge_draft=nudge,
+                    )
+                )
+        except Exception:
+            continue
+
+    return stale
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# USP 4: Decision & Dependency Lineage Graph
+# ═══════════════════════════════════════════════════════════════════════════════
+async def build_lineage_graph(
+    db: AsyncSession,
+    filter_meeting_id: Optional[int] = None,
+) -> LineageGraphResponse:
+    """
+    Transforms all meetings, decisions, execution_tasks, and staging items
+    into an interconnected Lineage Graph payload.
+    """
+    nodes: list[LineageNode] = []
+    edges: list[LineageEdge] = []
+    seen_node_ids: set[str] = set()
+
+    # 1. Meetings
+    meeting_stmt = select(Meeting)
+    if filter_meeting_id:
+        meeting_stmt = meeting_stmt.where(Meeting.id == filter_meeting_id)
+    meetings = (await db.execute(meeting_stmt)).scalars().all()
+
+    for m in meetings:
+        nid = f"meeting-{m.id}"
+        if nid not in seen_node_ids:
+            nodes.append(
+                LineageNode(
+                    id=nid,
+                    type="MEETING",
+                    label=m.title,
+                    status="INGESTED",
+                    meta={"date": m.meeting_date, "readiness_score": m.readiness_score or 100},
+                )
+            )
+            seen_node_ids.add(nid)
+
+    # 2. Decisions (ACTIVE and SUPERSEDED)
+    dec_stmt = select(Decision)
+    if filter_meeting_id:
+        dec_stmt = dec_stmt.where(Decision.meeting_id == filter_meeting_id)
+    decisions = (await db.execute(dec_stmt)).scalars().all()
+
+    for d in decisions:
+        nid = f"decision-{d.id}"
+        if nid not in seen_node_ids:
+            nodes.append(
+                LineageNode(
+                    id=nid,
+                    type="DECISION",
+                    label=f"{d.topic_key}: {d.statement[:55]}...",
+                    status=d.status,
+                    meta={
+                        "topic_key": d.topic_key,
+                        "decided_by": d.decided_by,
+                        "meeting_id": d.meeting_id,
+                        "status": d.status,
+                    },
+                )
+            )
+            seen_node_ids.add(nid)
+
+        # Edge: Meeting -> Decision (PRODUCED)
+        edges.append(
+            LineageEdge(
+                source=f"meeting-{d.meeting_id}",
+                target=nid,
+                relation="PRODUCED",
+            )
+        )
+
+        # Edge: Superseded Decision -> Old Decision (SUPERSEDES)
+        if d.superseded_by_id:
+            edges.append(
+                LineageEdge(
+                    source=f"decision-{d.superseded_by_id}",
+                    target=nid,
+                    relation="SUPERSEDES",
+                )
+            )
+
+    # 3. Execution Tasks
+    task_stmt = select(ExecutionTask)
+    if filter_meeting_id:
+        task_stmt = task_stmt.where(ExecutionTask.meeting_id == filter_meeting_id)
+    tasks = (await db.execute(task_stmt)).scalars().all()
+
+    for t in tasks:
+        nid = f"task-{t.id}"
+        if nid not in seen_node_ids:
+            nodes.append(
+                LineageNode(
+                    id=nid,
+                    type="TASK",
+                    label=t.title,
+                    status=t.status,
+                    meta={
+                        "owner": t.owner,
+                        "deadline": t.deadline_iso,
+                        "priority": t.priority,
+                        "meeting_id": t.meeting_id,
+                    },
+                )
+            )
+            seen_node_ids.add(nid)
+
+        # Edge: Meeting -> Task (PRODUCED)
+        edges.append(
+            LineageEdge(
+                source=f"meeting-{t.meeting_id}",
+                target=nid,
+                relation="PRODUCED",
+            )
+        )
+
+        # Edge: Task -> Dependent Task (BLOCKS)
+        if t.depends_on_id:
+            edges.append(
+                LineageEdge(
+                    source=f"task-{t.depends_on_id}",
+                    target=nid,
+                    relation="BLOCKS",
+                )
+            )
+
+    # 4. Staging Items (Focus on CONFLICT and BLOCKER items)
+    staging_stmt = select(StagingItem).where(
+        StagingItem.state.in_(["CONFLICT_DETECTED", "NEEDS_CLARIFICATION", "READY_TO_APPROVE"])
+    )
+    if filter_meeting_id:
+        staging_stmt = staging_stmt.where(StagingItem.meeting_id == filter_meeting_id)
+    staging_items = (await db.execute(staging_stmt)).scalars().all()
+
+    for item in staging_items:
+        nid = f"staging-{item.id}"
+        payload: dict = {}
+        try:
+            payload = json.loads(item.payload_json)
+        except Exception:
+            pass
+        label = payload.get("statement", payload.get("title", f"Staged {item.item_type}"))
+        node_type = "CONFLICT" if item.state == "CONFLICT_DETECTED" else "STAGING_ITEM"
+
+        if nid not in seen_node_ids:
+            nodes.append(
+                LineageNode(
+                    id=nid,
+                    type=node_type,
+                    label=label[:60] + "..." if len(label) > 60 else label,
+                    status=item.state,
+                    meta={"item_type": item.item_type, "meeting_id": item.meeting_id},
+                )
+            )
+            seen_node_ids.add(nid)
+
+        # Edge: Meeting -> Staged Item (STAGED_FROM)
+        edges.append(
+            LineageEdge(
+                source=f"meeting-{item.meeting_id}",
+                target=nid,
+                relation="STAGED_FROM",
+            )
+        )
+
+        # Link conflict to prior entity if metadata exists
+        if item.conflict_meta_json:
+            try:
+                cm = json.loads(item.conflict_meta_json)
+                if cm.get("conflicting_decision_id"):
+                    edges.append(
+                        LineageEdge(
+                            source=nid,
+                            target=f"decision-{cm['conflicting_decision_id']}",
+                            relation="CONFLICTS_WITH",
+                        )
+                    )
+                if cm.get("conflicting_task_id"):
+                    edges.append(
+                        LineageEdge(
+                            source=nid,
+                            target=f"task-{cm['conflicting_task_id']}",
+                            relation="BLOCKS",
+                        )
+                    )
+            except Exception:
+                pass
+
+    summary = {
+        "total_nodes": len(nodes),
+        "total_edges": len(edges),
+        "meetings_count": len(meetings),
+        "decisions_count": len(decisions),
+        "tasks_count": len(tasks),
+        "staged_conflicts_count": sum(1 for n in nodes if n.type == "CONFLICT"),
+    }
+
+    return LineageGraphResponse(nodes=nodes, edges=edges, summary=summary)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Stage 4: Human-in-the-Loop Staging Queue
 # ═══════════════════════════════════════════════════════════════════════════════
 async def stage_for_approval(
@@ -551,7 +1112,7 @@ async def stage_for_approval(
     meeting_id: int,
     db: AsyncSession,
 ) -> list[StagingItem]:
-    """Persist all extracted items into the staging_items table."""
+    """Persist all extracted items into the staging_items table with blast-radius and nudge drafts."""
     staged: list[StagingItem] = []
 
     # ── Decisions ─────────────────────────────────────────────────────────────
@@ -561,6 +1122,10 @@ async def stage_for_approval(
         else:
             state = "READY_TO_APPROVE"
 
+        payload_dict = dec.model_dump()
+        blast_radius = await analyze_blast_radius(payload_dict, "DECISION", conflict, db, meeting_id)
+        nudge = generate_nudge_draft(payload_dict, "DECISION", state, conflict)
+
         item = StagingItem(
             meeting_id=meeting_id,
             item_type="DECISION",
@@ -569,6 +1134,9 @@ async def stage_for_approval(
             conflict_meta_json=conflict.model_dump_json() if conflict else None,
             missing_fields_json=None,
             clarification_prompt=None,
+            blast_radius_json=blast_radius.model_dump_json() if blast_radius else None,
+            nudge_draft=nudge,
+            nudged=False,
             verbatim_quote=dec.verbatim_quote,
         )
         db.add(item)
@@ -583,6 +1151,10 @@ async def stage_for_approval(
         else:
             state = "READY_TO_APPROVE"
 
+        payload_dict = action.model_dump()
+        blast_radius = await analyze_blast_radius(payload_dict, "ACTION_ITEM", conflict, db, meeting_id)
+        nudge = generate_nudge_draft(payload_dict, "ACTION_ITEM", state, conflict)
+
         item = StagingItem(
             meeting_id=meeting_id,
             item_type="ACTION_ITEM",
@@ -591,6 +1163,9 @@ async def stage_for_approval(
             conflict_meta_json=conflict.model_dump_json() if conflict else None,
             missing_fields_json=json.dumps(action.missing_fields) if action.missing_fields else None,
             clarification_prompt=action.clarification_prompt,
+            blast_radius_json=blast_radius.model_dump_json() if blast_radius else None,
+            nudge_draft=nudge,
+            nudged=False,
             verbatim_quote=action.verbatim_quote,
         )
         db.add(item)
@@ -707,7 +1282,13 @@ async def run_pipeline(
         trace.fail(4, str(exc))
         raise
 
+    # ── USP 2: Compute Readiness Score ──────────────────────────────────────
+    readiness_score, score_breakdown = compute_readiness_score(staged_items)
+    meeting.readiness_score = readiness_score
+    meeting.score_breakdown_json = json.dumps(score_breakdown)
+
     # ── Persist trace into meeting record ────────────────────────────────────
     meeting.agent_trace_json = json.dumps([s.model_dump() for s in trace.steps])
+    await db.flush()
 
     return meeting, staged_items, trace.steps

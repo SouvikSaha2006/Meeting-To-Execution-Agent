@@ -62,9 +62,31 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 
 
 async def init_db() -> None:
-    """Create all tables (idempotent — safe to call on every startup)."""
-    # Import models so their metadata is registered before create_all.
+    """Create all tables and safely migrate new columns on startup."""
     import backend.models  # noqa: F401
+    from sqlalchemy import text
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+        # Safe SQLite column migration for new feature columns
+        if _is_sqlite:
+            migrations = [
+                ("meetings", "readiness_score", "INTEGER DEFAULT 100"),
+                ("meetings", "score_breakdown_json", "TEXT"),
+                ("staging_items", "blast_radius_json", "TEXT"),
+                ("staging_items", "nudge_draft", "TEXT"),
+                ("staging_items", "nudged", "BOOLEAN DEFAULT 0"),
+                ("staging_items", "nudge_receipt_json", "TEXT"),
+                ("execution_tasks", "nudge_draft", "TEXT"),
+                ("execution_tasks", "nudged", "BOOLEAN DEFAULT 0"),
+                ("execution_tasks", "nudge_receipt_json", "TEXT"),
+            ]
+            for tbl, col, col_type in migrations:
+                try:
+                    res = await conn.execute(text(f"PRAGMA table_info({tbl})"))
+                    cols = [row[1] for row in res.fetchall()]
+                    if col not in cols:
+                        await conn.execute(text(f"ALTER TABLE {tbl} ADD COLUMN {col} {col_type}"))
+                except Exception:
+                    pass

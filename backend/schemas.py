@@ -103,6 +103,57 @@ class SpeakerSegment(BaseModel):
     line_end: int
 
 
+# ── Blast Radius Simulation ──────────────────────────────────────────────────
+class BlastRadiusTaskImpact(BaseModel):
+    task_id: Optional[int] = None
+    title: str
+    owner: Optional[str] = None
+    current_deadline: Optional[str] = None
+    impact_reason: str
+
+
+class BlastRadiusReport(BaseModel):
+    risk_level: Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"]
+    impacted_tasks: List[BlastRadiusTaskImpact] = Field(default_factory=list)
+    estimated_delay_days: int
+    mitigation_suggestion: str
+
+
+# ── Stale Commitment (Watchdog) ──────────────────────────────────────────────
+class StaleCommitment(BaseModel):
+    task_id: int
+    title: str
+    owner: Optional[str] = None
+    deadline_iso: Optional[str] = None
+    meeting_id: int
+    meeting_title: str
+    meeting_date: str
+    days_overdue: int
+    urgency: Literal["OVERDUE", "DUE_TODAY", "CRITICAL"]
+    nudge_draft: Optional[str] = None
+
+
+# ── Lineage Graph Schemas ─────────────────────────────────────────────────────
+class LineageNode(BaseModel):
+    id: str
+    type: Literal["MEETING", "DECISION", "TASK", "CONFLICT", "STAGING_ITEM"]
+    label: str
+    status: Optional[str] = None
+    meta: dict[str, Any] = Field(default_factory=dict)
+
+
+class LineageEdge(BaseModel):
+    source: str
+    target: str
+    relation: Literal["PRODUCED", "SUPERSEDES", "CONFLICTS_WITH", "BLOCKS", "DEPENDS_ON", "STAGED_FROM"]
+
+
+class LineageGraphResponse(BaseModel):
+    nodes: List[LineageNode]
+    edges: List[LineageEdge]
+    summary: dict[str, Any]
+
+
 # ── Conflict / Duplicate meta ─────────────────────────────────────────────────
 class ConflictMeta(BaseModel):
     conflict_type: Literal["CONFLICT", "DUPLICATE", "BLOCKER_RISK"]
@@ -162,6 +213,14 @@ class UpdateTaskStatusRequest(BaseModel):
     status: Literal["TODO", "IN_PROGRESS", "DONE"]
 
 
+class SendNudgeRequest(BaseModel):
+    target_type: Literal["STAGING_ITEM", "TASK"]
+    target_id: int
+    recipient: str = Field(min_length=1)
+    channel: Literal["slack", "discord", "email"] = "slack"
+    message: Optional[str] = None
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 3. API RESPONSE SCHEMAS
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -175,6 +234,8 @@ class MeetingResponse(BaseModel):
     meeting_date: str
     created_at: datetime.datetime
     agent_trace_json: Optional[str] = None
+    readiness_score: Optional[int] = 100
+    score_breakdown_json: Optional[str] = None
 
 
 class DecisionResponse(BaseModel):
@@ -207,6 +268,11 @@ class StagingItemResponse(BaseModel):
     conflict_meta_json: Optional[str]
     missing_fields_json: Optional[str]
     clarification_prompt: Optional[str]
+    blast_radius_json: Optional[str] = None
+    blast_radius: Optional[BlastRadiusReport] = None
+    nudge_draft: Optional[str] = None
+    nudged: bool = False
+    nudge_receipt_json: Optional[str] = None
     verbatim_quote: Optional[str]
     rejection_reason: Optional[str]
     created_at: datetime.datetime
@@ -226,6 +292,9 @@ class ExecutionTaskResponse(BaseModel):
     status: str
     depends_on_id: Optional[int]
     external_execution_receipt_json: Optional[str]
+    nudge_draft: Optional[str] = None
+    nudged: bool = False
+    nudge_receipt_json: Optional[str] = None
     approved_at: Optional[datetime.datetime]
 
 
@@ -233,6 +302,7 @@ class IngestResponse(BaseModel):
     meeting: MeetingResponse
     staging_items: List[StagingItemResponse]
     agent_trace: List[AgentTraceStep]
+    stale_commitments: List[StaleCommitment] = Field(default_factory=list)
     summary: dict[str, Any]
 
 
@@ -245,6 +315,30 @@ class HealthResponse(BaseModel):
     webhook_integration: str
     version: str
     timestamp: str
+
+
+class SendNudgeResponse(BaseModel):
+    success: bool
+    target_type: str
+    target_id: int
+    recipient: str
+    channel: str
+    message: str
+    receipt: dict[str, Any]
+    nudged_at: str
+
+
+class AnalyticsHealthResponse(BaseModel):
+    execution_velocity: dict[str, Any]
+    overall_readiness_avg: float
+    readiness_trend: List[dict[str, Any]]
+    stale_tasks_count: int
+    stale_tasks: List[StaleCommitment]
+    active_conflicts_count: int
+    unresolved_clarifications_count: int
+    total_meetings: int
+    total_tasks: int
+    total_decisions: int
 
 
 class ApproveResponse(BaseModel):

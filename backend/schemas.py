@@ -408,3 +408,21 @@ class DispatchRemindersResponse(BaseModel):
     dispatched_count: int
     skipped_count: int
     reminders: List[ReminderLogResponse]
+
+
+# ── Natural Language Memory Query Schemas ─────────────────────────────────────
+class MemoryAskRequest(BaseModel):
+    question: str = Field(min_length=2, max_length=1000, description="Natural language question about organizational memory")
+
+
+class MemoryCitation(BaseModel):
+    meeting_title: str
+    meeting_date: str
+    speaker: str
+    quote: str
+
+
+class MemoryAskResponse(BaseModel):
+    answer: str
+    citations: List[MemoryCitation] = Field(default_factory=list)
+    related_task_ids: List[int] = Field(default_factory=list)

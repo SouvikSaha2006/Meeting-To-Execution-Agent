@@ -17,6 +17,7 @@ GET  /api/tasks
 PATCH /api/tasks/{task_id}/status
 GET  /api/decisions
 GET  /api/digest/weekly
+POST /api/memory/ask
 """
 from __future__ import annotations
 
@@ -52,6 +53,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.agent_pipeline import (
+    ask_organizational_memory,
     build_lineage_graph,
     compute_readiness_score,
     find_stale_commitments,
@@ -82,6 +84,8 @@ from backend.schemas import (
     LLMDecision,
     MeetingIngestRequest,
     MeetingResponse,
+    MemoryAskRequest,
+    MemoryAskResponse,
     RejectItemRequest,
     ReminderLogResponse,
     ResolveItemRequest,
@@ -1450,6 +1454,18 @@ async def list_reminder_logs(
         )
         for l in logs
     ]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Organizational Memory Natural Language Query Endpoint
+# ═══════════════════════════════════════════════════════════════════════════════
+@app.post("/api/memory/ask", response_model=MemoryAskResponse, tags=["Memory"])
+async def ask_memory(req: MemoryAskRequest, db: AsyncSession = Depends(get_db)):
+    """
+    Query cross-meeting decisions, tasks, and transcripts using natural language.
+    Strictly cites meeting title, meeting date, speaker, and verbatim quote.
+    """
+    return await ask_organizational_memory(question=req.question, db=db)
 
 
 if __name__ == "__main__":

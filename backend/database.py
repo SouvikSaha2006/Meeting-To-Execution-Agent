@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.orm import DeclarativeBase
 
 # ── Database URL ────────────────────────────────────────────────────────────
-_raw_db_url = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./vela.db")
+_raw_db_url = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./veriflow.db")
 if _raw_db_url.startswith("sqlite://") and not _raw_db_url.startswith("sqlite+aiosqlite://"):
     _raw_db_url = _raw_db_url.replace("sqlite://", "sqlite+aiosqlite://", 1)
 elif _raw_db_url.startswith("postgres://"):

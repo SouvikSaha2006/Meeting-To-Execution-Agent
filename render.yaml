@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: vela-backend
+    name: veriflow-backend
     env: python
     region: oregon
     plan: free
@@ -10,7 +10,7 @@ services:
       - key: PYTHON_VERSION
         value: 3.11.9
       - key: DATABASE_URL
-        value: sqlite+aiosqlite:///./vela.db
+        value: sqlite+aiosqlite:///./veriflow.db
       - key: DEMO_MODE
         value: "false"
       - key: GEMINI_MODEL

@@ -137,7 +137,7 @@ export const VeriflowWorkspace = forwardRef(function VeriflowWorkspace(props, re
             {coldStartState === 'waking' && (
               <span className="ws-coldstart-pill waking">
                 <span className="ws-coldstart-dot pulse" />
-                Waking up Vela Agent Engine...
+                Waking up VeriFlow Agent Engine...
               </span>
             )}
             {coldStartState === 'online' && (

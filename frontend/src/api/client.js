@@ -1,18 +1,20 @@
 // API client layer for VeriFlow frontend
-// All requests target the local FastAPI backend.
+// Resolves local or cloud backend via centralized config.
+import { API_BASE } from '../config/api.js';
 
-export const API_BASE = ((typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_URL) || 'http://localhost:8000').replace(/\/+$/, '');
 const BASE = API_BASE;
+export { API_BASE };
 
 /**
  * Core fetch wrapper.
  * Throws { status, detail } on non-2xx responses.
  * Returns parsed JSON on success.
  */
-async function request(method, path, body) {
+async function request(method, path, body, extraOptions = {}) {
   const options = {
     method,
     headers: { 'Content-Type': 'application/json' },
+    ...extraOptions,
   };
 
   if (body !== undefined) {
@@ -99,8 +101,8 @@ export const getItemBlastRadius = (id) =>
  *           recipient: string, channel: 'slack'|'discord'|'email',
  *           message?: string }} body
  */
-export const sendNudge = (body) =>
-  request('POST', '/api/actions/send-nudge', body);
+export const sendNudge = (body, extraOptions = {}) =>
+  request('POST', '/api/actions/send-nudge', body, extraOptions);
 
 // ---------------------------------------------------------------------------
 // Proactive Deadline Reminders

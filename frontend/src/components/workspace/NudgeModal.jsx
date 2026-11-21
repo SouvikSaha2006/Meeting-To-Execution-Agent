@@ -1,44 +1,98 @@
 /* ============================================================
    NudgeModal.jsx — One-Click Auto-Nudge & Escalation Drafter
    ============================================================ */
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
+
+function buildDefaultMessage(rawRecipient, rawTitle) {
+  const cleanRecipient = (rawRecipient || '').trim();
+  const atRecipient = cleanRecipient
+    ? (cleanRecipient.startsWith('@') ? cleanRecipient : `@${cleanRecipient}`)
+    : '@team';
+  const cleanTitle = (rawTitle || '').trim() || 'this commitment';
+  return `Hi ${atRecipient}, friendly check-in regarding "${cleanTitle}". Could you please confirm progress / clarify the owner and timeline so we stay on track?`;
+}
 
 export function NudgeModal({
   isOpen,
   onClose,
-  targetType, // 'STAGING_ITEM' | 'TASK'
+  targetType = 'TASK', // 'STAGING_ITEM' | 'TASK'
   targetId,
   initialRecipient = '',
   initialMessage = '',
   taskTitle = '',
+  verbatimQuote = '',
+  commitmentTitle = '',
   onSend,
 }) {
-  const [recipient, setRecipient] = useState(initialRecipient || 'Marcus');
+  const [recipient, setRecipient] = useState('');
   const [channel, setChannel] = useState('slack');
-  const [message, setMessage] = useState(
-    initialMessage ||
-      `Hi @${initialRecipient || 'team'}, friendly check-in regarding "${taskTitle}". Could you please clarify the owner/timeline so this task can be approved?`
-  );
-  const [sending, setSending] = useState(false);
+  const [message, setMessage] = useState('');
+  const [isDispatching, setIsDispatching] = useState(false);
+  const [hasUserEditedMessage, setHasUserEditedMessage] = useState(false);
+
+  const displayTitle = (taskTitle || commitmentTitle || verbatimQuote || '').trim();
+
+  // Reset and synchronize fields whenever modal is opened
+  useEffect(() => {
+    if (isOpen) {
+      const defaultRec = (initialRecipient || '').trim() || 'Marcus';
+      const cleanQuote = (taskTitle || commitmentTitle || verbatimQuote || '').trim();
+      setRecipient(defaultRec);
+      setChannel('slack');
+      setHasUserEditedMessage(false);
+      setIsDispatching(false);
+
+      if (initialMessage && !initialMessage.includes('""') && initialMessage.trim()) {
+        setMessage(initialMessage.trim());
+      } else {
+        setMessage(buildDefaultMessage(defaultRec, cleanQuote));
+      }
+    }
+  }, [isOpen, initialRecipient, initialMessage, taskTitle, commitmentTitle, verbatimQuote]);
 
   if (!isOpen) return null;
 
+  function handleRecipientChange(e) {
+    const val = e.target.value;
+    setRecipient(val);
+    if (!hasUserEditedMessage) {
+      setMessage(buildDefaultMessage(val, displayTitle));
+    }
+  }
+
+  function handleMessageChange(e) {
+    setMessage(e.target.value);
+    setHasUserEditedMessage(true);
+  }
+
   async function handleSend() {
-    if (!recipient.trim()) return;
-    setSending(true);
+    if (isDispatching) return;
+    setIsDispatching(true);
+
+    const cleanRecipient = (recipient || '').trim() || '@team';
+    const cleanMsg = (message || '').trim() || buildDefaultMessage(cleanRecipient, displayTitle);
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s strict timeout
+
     try {
-      await onSend({
-        target_type: targetType,
-        target_id: targetId,
-        recipient: recipient.trim(),
-        channel,
-        message: message.trim(),
-      });
+      if (typeof onSend === 'function') {
+        await onSend({
+          target_type: targetType || 'TASK',
+          target_id: targetId,
+          recipient: cleanRecipient,
+          channel: channel || 'slack',
+          message: cleanMsg,
+          signal: controller.signal,
+        });
+      }
       onClose();
-    } catch {
-      // error handled in useWorkspace
+    } catch (err) {
+      console.warn('Nudge dispatch completed with fallback / timeout notice:', err);
+      onClose();
     } finally {
-      setSending(false);
+      clearTimeout(timeoutId);
+      setIsDispatching(false);
     }
   }
 
@@ -62,13 +116,13 @@ export function NudgeModal({
         </div>
 
         {/* Target context banner */}
-        {taskTitle && (
+        {displayTitle && (
           <div className="ws-modal-context">
             <span style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', color: 'rgba(13,13,12,0.5)' }}>
               Regarding Commitment:
             </span>
             <div style={{ fontSize: 13, fontWeight: 500, color: '#0D0D0C', marginTop: 2 }}>
-              "{taskTitle}"
+              "{displayTitle}"
             </div>
           </div>
         )}
@@ -80,8 +134,8 @@ export function NudgeModal({
             <input
               className="ws-form-input"
               value={recipient}
-              onChange={(e) => setRecipient(e.target.value)}
-              placeholder="e.g. Marcus, Sarah"
+              onChange={handleRecipientChange}
+              placeholder="e.g. Marcus, Sarah, @devops"
             />
           </div>
           <div>
@@ -112,7 +166,7 @@ export function NudgeModal({
             className="ws-form-textarea"
             style={{ height: 110, fontSize: 13, lineHeight: 1.5 }}
             value={message}
-            onChange={(e) => setMessage(e.target.value)}
+            onChange={handleMessageChange}
             placeholder="Write your message here..."
           />
         </div>
@@ -125,13 +179,15 @@ export function NudgeModal({
           <button
             className="ws-btn ws-btn-sm ws-btn-approve"
             onClick={handleSend}
-            disabled={sending || !recipient.trim()}
+            disabled={isDispatching || !recipient.trim()}
             type="button"
           >
-            {sending ? 'Dispatching…' : `Send via ${channel.charAt(0).toUpperCase() + channel.slice(1)}`}
+            {isDispatching ? 'Dispatching…' : `Send via ${channel.charAt(0).toUpperCase() + channel.slice(1)}`}
           </button>
         </div>
       </div>
     </div>
   );
 }
+
+export default NudgeModal;

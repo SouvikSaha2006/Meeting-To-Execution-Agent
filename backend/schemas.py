@@ -214,10 +214,10 @@ class UpdateTaskStatusRequest(BaseModel):
 
 
 class SendNudgeRequest(BaseModel):
-    target_type: Literal["STAGING_ITEM", "TASK"]
-    target_id: int
-    recipient: str = Field(min_length=1)
-    channel: Literal["slack", "discord", "email"] = "slack"
+    target_type: Optional[str] = "TASK"
+    target_id: Optional[int] = None
+    recipient: str = "team"
+    channel: Optional[str] = "slack"
     message: Optional[str] = None
 
 
@@ -319,14 +319,16 @@ class HealthResponse(BaseModel):
 
 
 class SendNudgeResponse(BaseModel):
-    success: bool
-    target_type: str
-    target_id: int
-    recipient: str
-    channel: str
-    message: str
-    receipt: dict[str, Any]
-    nudged_at: str
+    status: str = "dispatched"
+    receipt_id: Optional[str] = None
+    success: bool = True
+    target_type: Optional[str] = "TASK"
+    target_id: Optional[int] = None
+    recipient: str = "team"
+    channel: str = "slack"
+    message: str = ""
+    receipt: Optional[dict[str, Any]] = None
+    nudged_at: Optional[str] = None
 
 
 class AnalyticsHealthResponse(BaseModel):

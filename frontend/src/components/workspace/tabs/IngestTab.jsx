@@ -456,18 +456,21 @@ function ClarifyCard({ item, actions, onOpenNudge }) {
           type="button"
           className="ws-btn ws-btn-sm"
           style={{ height: 28, fontSize: 11, gap: 4 }}
-          onClick={() =>
+          onClick={() => {
+            const cleanTitle = title || item.verbatim_quote || 'this commitment';
             onOpenNudge({
               targetType: 'STAGING_ITEM',
               targetId: item.id,
               recipient: owner || payload.owner || 'DevOps Team',
-              taskTitle: title,
+              taskTitle: cleanTitle,
+              verbatimQuote: item.verbatim_quote || '',
+              commitmentTitle: cleanTitle,
               message:
                 item.nudge_draft ||
                 payload.clarification_prompt ||
-                `Hi team, could you please confirm the owner and deadline for "${title}" so we can stage and dispatch it?`,
-            })
-          }
+                `Hi team, could you please confirm the owner and deadline for "${cleanTitle}" so we can stage and dispatch it?`,
+            });
+          }}
         >
           ⚡ Draft &amp; Send Nudge
         </button>
@@ -634,17 +637,19 @@ function StagingQueue({ state, actions, onToast, onOpenNudge }) {
       {/* Watchdog Alert Banner */}
       <WatchdogBanner
         staleCommitments={state.staleCommitments}
-        onNudge={(task) =>
+        onNudge={(task) => {
+          const title = task.title || 'this task';
           onOpenNudge({
             targetType: 'TASK',
             targetId: task.task_id,
             recipient: task.owner || 'Team',
-            taskTitle: task.title,
+            taskTitle: title,
+            commitmentTitle: title,
             message:
               task.nudge_draft ||
-              `Hi @${task.owner}, friendly reminder that task "${task.title}" is untouched in TODO. Please share a quick update!`,
-          })
-        }
+              `Hi @${task.owner || 'team'}, friendly reminder that task "${title}" is untouched in TODO. Please share a quick update!`,
+          });
+        }}
       />
 
       {/* Queue Header & Filters */}
@@ -1029,6 +1034,8 @@ export function IngestTab({ state, actions }) {
         targetId={nudgeModal.targetId}
         initialRecipient={nudgeModal.recipient}
         taskTitle={nudgeModal.taskTitle}
+        commitmentTitle={nudgeModal.commitmentTitle}
+        verbatimQuote={nudgeModal.verbatimQuote}
         initialMessage={nudgeModal.message}
         onSend={actions.sendNudgeAction}
       />

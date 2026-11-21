@@ -11,6 +11,7 @@ ensuring the system works for live demos under rate limits or offline conditions
 """
 from __future__ import annotations
 
+import asyncio
 import datetime
 import json
 import logging
@@ -275,21 +276,25 @@ async def extract_commitments_llm(
 
         client = genai.Client(api_key=active_api_key)
 
-        response = client.models.generate_content(
-            model=active_model,
-            contents=[
-                genai_types.Content(
-                    role="user",
-                    parts=[genai_types.Part(text=_EXTRACTION_SYSTEM_PROMPT + "\n\n" + prompt)],
-                )
-            ],
-            config=genai_types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=_build_llm_schema(),
-                temperature=0.1,  # Low temperature for deterministic extraction
-                max_output_tokens=8192,
-            ),
-        )
+        def _call_gemini_extraction():
+            return client.models.generate_content(
+                model=active_model,
+                contents=[
+                    genai_types.Content(
+                        role="user",
+                        parts=[genai_types.Part(text=_EXTRACTION_SYSTEM_PROMPT + "\n\n" + prompt)],
+                    )
+                ],
+                config=genai_types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=_build_llm_schema(),
+                    temperature=0.1,  # Low temperature for deterministic extraction
+                    max_output_tokens=8192,
+                ),
+            )
+
+        # Strict 8-second timeout + thread offloading to prevent event loop blocking
+        response = await asyncio.wait_for(asyncio.to_thread(_call_gemini_extraction), timeout=8.0)
 
         raw_json = response.text
         data = json.loads(raw_json)
@@ -1494,20 +1499,25 @@ async def ask_organizational_memory(
             user_prompt = f"ORGANIZATIONAL CONTEXT:\n{full_context}\n\nQUESTION: {question}"
 
             client = genai.Client(api_key=active_key)
-            response = client.models.generate_content(
-                model=active_model,
-                contents=[
-                    genai_types.Content(
-                        role="user",
-                        parts=[genai_types.Part(text=sys_prompt + "\n\n" + user_prompt)],
-                    )
-                ],
-                config=genai_types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=memory_schema,
-                    temperature=0.1,
-                ),
-            )
+
+            def _call_gemini_memory():
+                return client.models.generate_content(
+                    model=active_model,
+                    contents=[
+                        genai_types.Content(
+                            role="user",
+                            parts=[genai_types.Part(text=sys_prompt + "\n\n" + user_prompt)],
+                        )
+                    ],
+                    config=genai_types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=memory_schema,
+                        temperature=0.1,
+                    ),
+                )
+
+            # Strict 8-second timeout + thread offloading to prevent event loop blocking
+            response = await asyncio.wait_for(asyncio.to_thread(_call_gemini_memory), timeout=8.0)
             data = json.loads(response.text)
             ans = data.get("answer", "")
             # If model returned empty or fallback string despite context existing, fall back to deterministic

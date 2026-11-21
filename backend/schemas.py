@@ -359,17 +359,21 @@ class BulkApproveResponse(BaseModel):
 
 class WeeklyDigestOwner(BaseModel):
     owner: str
-    completed_tasks: List[dict]
-    newly_assigned: List[dict]
-    upcoming_deadlines: List[dict]
-    resolved_conflicts: List[dict]
+    completed_tasks: List[dict] = []
+    newly_assigned: List[dict] = []
+    upcoming_deadlines: List[dict] = []
+    resolved_conflicts: List[dict] = []
 
 
 class WeeklyDigestResponse(BaseModel):
     generated_at: str
     period: str
-    owners: List[WeeklyDigestOwner]
+    summary_stats: Optional[dict] = None
+    owners: List[WeeklyDigestOwner] = []
+    by_owner: Optional[List[WeeklyDigestOwner]] = None
+    resolved_conflicts: Optional[List[dict]] = None
     markdown: str
+    markdown_digest: Optional[str] = None
 
 
 # ── Proactive Deadline Reminder Engine Schemas ────────────────────────────────
@@ -407,8 +411,9 @@ class ReminderLogResponse(BaseModel):
 
 
 class DispatchRemindersResponse(BaseModel):
+    status: Optional[str] = "dispatched"
     dispatched_count: int
-    skipped_count: int
+    skipped_count: Optional[int] = 0
     reminders: List[ReminderLogResponse]
 
 

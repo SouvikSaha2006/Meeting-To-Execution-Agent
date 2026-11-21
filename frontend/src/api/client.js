@@ -110,8 +110,8 @@ export const sendNudge = (body, extraOptions = {}) =>
 export const getUpcomingReminders = (withinHours = 48) =>
   request('GET', `/api/reminders/upcoming?within_hours=${withinHours}`);
 
-export const dispatchAllReminders = (withinHours = 48) =>
-  request('POST', `/api/reminders/dispatch-all?within_hours=${withinHours}`);
+export const dispatchAllReminders = (withinHours = 48, extraOptions = {}) =>
+  request('POST', `/api/reminders/dispatch-all?within_hours=${withinHours}`, undefined, extraOptions);
 
 export const sendTaskReminder = (taskId, channel = 'webhook') =>
   request('POST', `/api/reminders/${taskId}/send?channel=${channel}`);

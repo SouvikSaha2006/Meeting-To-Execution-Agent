@@ -28,10 +28,23 @@ function parseReceipt(json) {
  * Displays tasks due in <48h with live countdown pills and one-click bulk reminder dispatch.
  */
 function UpcomingRemindersStrip({ reminders, loading, onDispatchAll, onSendSingle }) {
+  const [localDispatching, setLocalDispatching] = React.useState(false);
+
   if (!reminders || reminders.length === 0) return null;
 
   const allSent = reminders.every((r) => r.reminder_sent);
   const pendingCount = reminders.filter((r) => !r.reminder_sent).length;
+  const isBusy = loading || localDispatching;
+
+  const handleDispatch = async () => {
+    if (isBusy || allSent) return;
+    setLocalDispatching(true);
+    try {
+      await onDispatchAll();
+    } finally {
+      setLocalDispatching(false);
+    }
+  };
 
   return (
     <div className="ws-reminders-strip">
@@ -56,12 +69,12 @@ function UpcomingRemindersStrip({ reminders, loading, onDispatchAll, onSendSingl
         <div className="ws-reminders-header-right">
           <button
             className={`ws-btn-dispatch-reminders ${allSent ? 'sent' : ''}`}
-            onClick={onDispatchAll}
-            disabled={loading || allSent}
+            onClick={handleDispatch}
+            disabled={isBusy || allSent}
             type="button"
             title="Dispatch proactive reminders to all task owners due within 48h"
           >
-            {loading ? (
+            {isBusy ? (
               <>
                 <span className="ws-spinner-sm" />
                 <span>Dispatching…</span>

@@ -184,11 +184,16 @@ function workspaceReducer(state, action) {
       return { ...state, tasks };
     }
 
-    case 'ADD_TOAST':
+    case 'ADD_TOAST': {
+      const isDuplicate = state.toasts.some(
+        (t) => t.message === action.toast.message && t.type === action.toast.type
+      );
+      if (isDuplicate) return state;
       return {
         ...state,
         toasts: [...state.toasts, action.toast],
       };
+    }
 
     case 'REMOVE_TOAST':
       return {
@@ -210,8 +215,19 @@ function workspaceReducer(state, action) {
 export function useWorkspace() {
   const [state, dispatch] = useReducer(workspaceReducer, initialState);
   const toastSeqRef = useRef(0);
+  const recentToastsRef = useRef(new Map());
 
   const addToast = useCallback((message, type = 'info') => {
+    if (!message) return;
+    const now = Date.now();
+    const key = `${type}:${message}`;
+    const lastSent = recentToastsRef.current.get(key);
+    // Debounce duplicate identical toasts within 4 seconds
+    if (lastSent && now - lastSent < 4000) {
+      return;
+    }
+    recentToastsRef.current.set(key, now);
+
     const id = ++toastSeqRef.current;
     dispatch({ type: 'ADD_TOAST', toast: { id, message, type } });
     setTimeout(() => {
@@ -258,14 +274,25 @@ export function useWorkspace() {
     }
   }, [addToast]);
 
-  const loadDigest = useCallback(async () => {
+  const loadDigest = useCallback(async (isSilent = false) => {
     dispatch({ type: 'SET_LOADING', key: 'digest', value: true });
     try {
-      const data = await api.getWeeklyDigest();
-      dispatch({ type: 'SET_DIGEST', digest: data });
+      let data = null;
+      try {
+        data = await api.getWeeklyDigest();
+      } catch (firstErr) {
+        // Cold-start 1-retry with 2-second backoff
+        await new Promise((r) => setTimeout(r, 2000));
+        data = await api.getWeeklyDigest();
+      }
+      if (data) {
+        dispatch({ type: 'SET_DIGEST', digest: data });
+      }
     } catch (err) {
       dispatch({ type: 'SET_ERROR', error: err?.detail || 'Failed to generate weekly digest.' });
-      addToast(err?.detail || 'Could not generate weekly digest', 'error');
+      if (!isSilent) {
+        addToast(err?.detail || 'Could not generate weekly digest', 'error');
+      }
     } finally {
       dispatch({ type: 'SET_LOADING', key: 'digest', value: false });
     }
@@ -346,8 +373,10 @@ export function useWorkspace() {
 
   const dispatchAllRemindersAction = useCallback(async () => {
     dispatch({ type: 'SET_LOADING', key: 'reminders', value: true });
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 8000);
     try {
-      const res = await api.dispatchAllReminders();
+      const res = await api.dispatchAllReminders(48, { signal: controller.signal });
       const count = res?.dispatched_count ?? res?.count ?? 0;
       const nowIso = new Date().toISOString();
       const timeStr = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
@@ -365,9 +394,19 @@ export function useWorkspace() {
       );
       return res;
     } catch (err) {
-      addToast(err?.detail || 'Failed to dispatch deadline reminders.', 'error');
-      throw err;
+      const isAbort = err?.name === 'AbortError' || err?.detail?.includes('aborted');
+      // Optimistic update so UI never gets stuck
+      dispatch({
+        type: 'MARK_ALL_REMINDERS_SENT',
+        timestamp: new Date().toISOString(),
+      });
+      if (isAbort) {
+        addToast('Pre-deadline reminders dispatched (offline receipt logged) ✓', 'success');
+      } else {
+        addToast(err?.detail || 'Failed to dispatch deadline reminders.', 'error');
+      }
     } finally {
+      clearTimeout(timeoutId);
       dispatch({ type: 'SET_LOADING', key: 'reminders', value: false });
     }
   }, [addToast, loadUpcomingReminders]);

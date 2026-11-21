@@ -245,7 +245,7 @@ async def dispatch_nudge(
                 "channel": channel,
                 "metadata": {"target_type": target_type, "target_id": target_id},
             }
-            async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+            async with httpx.AsyncClient(timeout=2.0) as client:
                 resp = await client.post(url, json=payload)
                 if resp.status_code in (200, 201, 204):
                     webhook_dispatched = True
@@ -311,7 +311,7 @@ async def dispatch_deadline_reminder(
                     }
                 ],
             }
-            async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+            async with httpx.AsyncClient(timeout=2.0) as client:
                 resp = await client.post(url, json=payload)
                 if resp.status_code in (200, 201, 204):
                     webhook_dispatched = True

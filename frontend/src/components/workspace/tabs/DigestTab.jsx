@@ -20,10 +20,11 @@ export function DigestTab({ state, actions }) {
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
-    if (!state.digest) {
-      actions.loadDigest();
+    if (!state.digest && !state.loading.digest) {
+      actions.loadDigest(true);
     }
-  }, [state.digest, actions]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function handleCopy() {
     if (!state.digest?.markdown) return;

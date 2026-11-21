@@ -16,9 +16,15 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.orm import DeclarativeBase
 
 # ── Database URL ────────────────────────────────────────────────────────────
-DATABASE_URL: str = os.getenv(
-    "DATABASE_URL", "sqlite+aiosqlite:///./meeting_agent.db"
-)
+_raw_db_url = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./vela.db")
+if _raw_db_url.startswith("sqlite://") and not _raw_db_url.startswith("sqlite+aiosqlite://"):
+    _raw_db_url = _raw_db_url.replace("sqlite://", "sqlite+aiosqlite://", 1)
+elif _raw_db_url.startswith("postgres://"):
+    _raw_db_url = _raw_db_url.replace("postgres://", "postgresql+asyncpg://", 1)
+elif _raw_db_url.startswith("postgresql://") and not _raw_db_url.startswith("postgresql+asyncpg://"):
+    _raw_db_url = _raw_db_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+
+DATABASE_URL: str = _raw_db_url
 
 # SQLite requires check_same_thread=False, but that kwarg only applies to
 # the sync driver. For aiosqlite we pass connect_args to suppress the

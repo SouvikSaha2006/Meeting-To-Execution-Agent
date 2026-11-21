@@ -226,7 +226,7 @@ export function useWorkspace() {
       dispatch({ type: 'SET_STAGING', staging: data });
     } catch (err) {
       dispatch({ type: 'SET_ERROR', error: err?.detail || 'Failed to load approval queue.' });
-      addToast(err?.detail || 'Could not connect to backend at localhost:8000', 'error');
+      addToast(err?.detail || `Could not connect to backend at ${api.API_BASE || 'API server'}`, 'error');
     } finally {
       dispatch({ type: 'SET_LOADING', key: 'staging', value: false });
     }

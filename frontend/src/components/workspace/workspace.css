@@ -2120,3 +2120,51 @@
   }
 }
 
+/* ── Render Cold-Start Wakeup Pill ──────────────────────────── */
+.ws-coldstart-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: 'Inter Tight', sans-serif;
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 100px;
+  white-space: nowrap;
+  animation: ws-fade-in 0.25s ease;
+}
+
+.ws-coldstart-pill.waking {
+  background: #F9CBA9;
+  border: 1.2px solid #F2772F;
+  color: #0D0D0C;
+}
+
+.ws-coldstart-pill.online {
+  background: #DFE9D4;
+  border: 1.2px solid #3FB874;
+  color: #1D5A35;
+}
+
+.ws-coldstart-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.ws-coldstart-dot.pulse {
+  background: #F2772F;
+  animation: ws-mic-blink 0.9s infinite alternate;
+}
+
+.ws-coldstart-dot.online {
+  background: #3FB874;
+}
+
+@keyframes ws-fade-in {
+  from { opacity: 0; transform: scale(0.96); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+

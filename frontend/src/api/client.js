@@ -1,7 +1,8 @@
 // API client layer for VeriFlow frontend
 // All requests target the local FastAPI backend.
 
-const BASE = 'http://localhost:8000';
+export const API_BASE = ((typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_URL) || 'http://localhost:8000').replace(/\/+$/, '');
+const BASE = API_BASE;
 
 /**
  * Core fetch wrapper.

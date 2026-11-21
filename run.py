@@ -37,7 +37,7 @@ import uvicorn
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Meeting-to-Execution Agent Server")
     parser.add_argument("--host", default="0.0.0.0", help="Bind host (default: 0.0.0.0)")
-    parser.add_argument("--port", type=int, default=8000, help="Bind port (default: 8000)")
+    parser.add_argument("--port", type=int, default=int(os.getenv("PORT", 8000)), help="Bind port (default: 8000 or $PORT)")
     parser.add_argument("--reload", action="store_true", help="Enable hot-reload (dev only)")
     parser.add_argument("--workers", type=int, default=1, help="Number of worker processes")
     args = parser.parse_args()

@@ -119,6 +119,7 @@ async def lifespan(app: FastAPI):
     logger.info("🚀 Meeting-to-Execution Agent starting up...")
     await init_db()
     logger.info("✅ Database initialised")
+    await seed_if_empty()
     if DEMO_MODE:
         logger.warning("⚠️  DEMO_MODE=true — Gemini API calls will use mock responses")
     yield
@@ -437,6 +438,49 @@ async def _load_meeting_with_precomputed_data(
     return meeting, staged_items
 
 
+async def seed_if_empty() -> None:
+    """If database has zero meetings, automatically seed demo state on startup."""
+    from sqlalchemy import func
+    from backend.database import AsyncSessionLocal
+    from backend.seed_data import (
+        MEETING_1_ACTION_ITEMS,
+        MEETING_1_DATE,
+        MEETING_1_DECISIONS,
+        MEETING_1_TITLE,
+        MEETING_1_TRANSCRIPT,
+        MEETING_2_ACTION_ITEMS,
+        MEETING_2_DATE,
+        MEETING_2_DECISIONS,
+        MEETING_2_TITLE,
+        MEETING_2_TRANSCRIPT,
+    )
+    try:
+        async with AsyncSessionLocal() as session:
+            count = (await session.execute(select(func.count(Meeting.id)))).scalar_one_or_none() or 0
+            if count == 0:
+                logger.info("🌱 Database is empty — auto-seeding demo meetings & decisions for instant judge readiness...")
+                m1, s1 = await _load_meeting_with_precomputed_data(
+                    MEETING_1_TITLE, MEETING_1_DATE, MEETING_1_TRANSCRIPT,
+                    MEETING_1_DECISIONS, MEETING_1_ACTION_ITEMS, session,
+                )
+                for item in s1:
+                    if item.state == "READY_TO_APPROVE":
+                        try:
+                            await _approve_single_item(item, session, conflict_resolution=None)
+                        except Exception:
+                            pass
+                m2, s2 = await _load_meeting_with_precomputed_data(
+                    MEETING_2_TITLE, MEETING_2_DATE, MEETING_2_TRANSCRIPT,
+                    MEETING_2_DECISIONS, MEETING_2_ACTION_ITEMS, session,
+                )
+                await session.commit()
+                logger.info("✅ Auto-seeded demo state: Meeting 1 (#%s) & Meeting 2 (#%s with conflicts)", m1.id, m2.id)
+            else:
+                logger.info("ℹ️ Database already populated with %s meeting(s) — skipping seed_if_empty()", count)
+    except Exception as exc:
+        logger.warning("⚠️ seed_if_empty() encountered an error (non-fatal): %s", exc)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # ROUTES
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -456,7 +500,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
     # Test Gemini API key presence
     gemini_key = os.getenv("GEMINI_API_KEY", "")
     active_demo = os.getenv("DEMO_MODE", "false").lower() in ("true", "1", "yes")
-    model_name = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
+    model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
     if active_demo:
         gemini_status = "demo_mode (bypassed)"
     elif gemini_key:
@@ -1470,4 +1514,5 @@ async def ask_memory(req: MemoryAskRequest, db: AsyncSession = Depends(get_db)):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("backend.main:app", host="0.0.0.0", port=8000, reload=True)
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run("backend.main:app", host="0.0.0.0", port=port, reload=True)

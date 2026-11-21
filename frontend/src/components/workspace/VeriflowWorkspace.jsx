@@ -3,6 +3,7 @@
    ============================================================ */
 import React, { useEffect, useState, forwardRef, useImperativeHandle } from 'react';
 import { useWorkspace } from './useWorkspace.js';
+import { getHealth } from '../../api/client.js';
 import { ToastContainer } from './ToastContainer.jsx';
 import { AskMemoryBar } from './AskMemoryBar.jsx';
 import { IngestTab } from './tabs/IngestTab.jsx';
@@ -24,6 +25,41 @@ export const VeriflowWorkspace = forwardRef(function VeriflowWorkspace(props, re
   const { state, dispatch, actions } = useWorkspace();
   const [demo1Loading, setDemo1Loading] = useState(false);
   const [demo2Loading, setDemo2Loading] = useState(false);
+  const [coldStartState, setColdStartState] = useState('idle'); // 'idle' | 'waking' | 'online' | 'dismissed'
+
+  // Render Cold-Start Wakeup: ping /api/health; if it takes >2s show warm wakeup pill
+  useEffect(() => {
+    let isMounted = true;
+    const timer = setTimeout(() => {
+      if (isMounted) {
+        setColdStartState((prev) => (prev === 'idle' ? 'waking' : prev));
+      }
+    }, 2000);
+
+    const pingHealth = async () => {
+      try {
+        await getHealth();
+        if (!isMounted) return;
+        clearTimeout(timer);
+        setColdStartState('online');
+        setTimeout(() => {
+          if (isMounted) setColdStartState('dismissed');
+        }, 5000);
+      } catch (err) {
+        if (!isMounted) return;
+        setColdStartState('waking');
+        // Retry in 3s during cold start
+        setTimeout(pingHealth, 3000);
+      }
+    };
+
+    pingHealth();
+
+    return () => {
+      isMounted = false;
+      clearTimeout(timer);
+    };
+  }, []);
 
   // On mount: load staging queue, analytics & upcoming deadline reminders
   useEffect(() => {
@@ -96,7 +132,21 @@ export const VeriflowWorkspace = forwardRef(function VeriflowWorkspace(props, re
       <div className="ws-header">
         {/* Left: label + tab pills */}
         <div className="ws-header-left">
-          <span className="ws-workspace-label">VeriFlow Workspace</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span className="ws-workspace-label">VeriFlow Workspace</span>
+            {coldStartState === 'waking' && (
+              <span className="ws-coldstart-pill waking">
+                <span className="ws-coldstart-dot pulse" />
+                Waking up Vela Agent Engine...
+              </span>
+            )}
+            {coldStartState === 'online' && (
+              <span className="ws-coldstart-pill online">
+                <span className="ws-coldstart-dot online" />
+                Agent Engine Online ✓
+              </span>
+            )}
+          </div>
           <div className="ws-tabs">
             {TABS.map((tab) => {
               const isActive = state.activeTab === tab.id;

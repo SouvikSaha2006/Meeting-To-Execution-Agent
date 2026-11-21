@@ -1,4 +1,5 @@
 export { VeriflowWorkspace } from './VeriflowWorkspace.jsx';
+export { AskMemoryBar } from './AskMemoryBar.jsx';
 export { NudgeModal } from './NudgeModal.jsx';
 export { IngestTab } from './tabs/IngestTab.jsx';
 export { BoardTab } from './tabs/BoardTab.jsx';

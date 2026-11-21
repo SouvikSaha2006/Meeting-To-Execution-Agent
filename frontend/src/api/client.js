@@ -145,6 +145,16 @@ export const getLineageGraph = (meetingId) =>
 export const getWeeklyDigest = () => request('GET', '/api/digest/weekly');
 
 // ---------------------------------------------------------------------------
+// Cross-Meeting Organizational Memory Query
+// ---------------------------------------------------------------------------
+/**
+ * @param {string} question
+ * @returns {Promise<{ answer: string, citations: Array<{ meeting_title: string, meeting_date: string, speaker: string, quote: string }>, related_task_ids: number[] }>}
+ */
+export const askMemory = (question) =>
+  request('POST', '/api/memory/ask', { question });
+
+// ---------------------------------------------------------------------------
 // Payload / meta utilities
 // ---------------------------------------------------------------------------
 

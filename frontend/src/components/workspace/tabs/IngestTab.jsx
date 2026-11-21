@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 import { parsePayload, parseConflictMeta, parseBlastRadius } from '../../../api/client.js';
 import { NudgeModal } from '../NudgeModal.jsx';
 
@@ -722,13 +722,117 @@ function StagingQueue({ state, actions, onToast, onOpenNudge }) {
   );
 }
 
-// ─── Ingest Form ──────────────────────────────────────────────────────────────
+// ─── Ingest Form with Live Voice Dictation ──────────────────────────────────
+const SPEAKERS = ['Sarah (PM)', 'Rohan (Backend)', 'Ananya (Design)'];
+
 function IngestForm({ state, actions }) {
   const [title, setTitle] = useState('');
   const [meetingDate, setMeetingDate] = useState('');
   const [transcript, setTranscript] = useState('');
   const [dragOver, setDragOver] = useState(false);
   const dropRef = useRef(null);
+
+  // Live Voice Dictation state
+  const [isListening, setIsListening] = useState(false);
+  const [activeSpeaker, setActiveSpeaker] = useState('Sarah (PM)');
+  const [speechSupported, setSpeechSupported] = useState(true);
+  const [speechError, setSpeechError] = useState(null);
+  const recognitionRef = useRef(null);
+  const activeSpeakerRef = useRef(activeSpeaker);
+
+  // Keep ref synced with latest selected speaker
+  useEffect(() => {
+    activeSpeakerRef.current = activeSpeaker;
+  }, [activeSpeaker]);
+
+  // Clean up speech recognition on unmount
+  useEffect(() => {
+    return () => {
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.abort();
+        } catch (_) {}
+      }
+    };
+  }, []);
+
+  function toggleDictation() {
+    const SpeechRecognition =
+      typeof window !== 'undefined'
+        ? window.SpeechRecognition || window.webkitSpeechRecognition
+        : null;
+
+    if (!SpeechRecognition) {
+      setSpeechSupported(false);
+      setSpeechError('Speech recognition is not supported in this browser. Please use Google Chrome or Microsoft Edge.');
+      return;
+    }
+
+    if (isListening) {
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.stop();
+        } catch (_) {}
+      }
+      setIsListening(false);
+      return;
+    }
+
+    setSpeechError(null);
+    try {
+      const recognition = new SpeechRecognition();
+      recognition.continuous = true;
+      recognition.interimResults = false;
+      recognition.lang = 'en-US';
+
+      recognition.onstart = () => {
+        setIsListening(true);
+      };
+
+      recognition.onresult = (event) => {
+        let finalChunk = '';
+        for (let i = event.resultIndex; i < event.results.length; ++i) {
+          if (event.results[i].isFinal) {
+            finalChunk += event.results[i][0].transcript;
+          }
+        }
+        const clean = finalChunk.trim();
+        if (clean) {
+          const speakerPrefix = activeSpeakerRef.current.split(' ')[0]; // 'Sarah', 'Rohan', 'Ananya'
+          const formattedLine = `[${speakerPrefix}]: ${clean}`;
+          setTranscript((prev) => (prev ? `${prev.trim()}\n${formattedLine}` : formattedLine));
+        }
+      };
+
+      recognition.onerror = (event) => {
+        console.warn('SpeechRecognition error:', event.error);
+        if (event.error === 'not-allowed') {
+          setSpeechError('Microphone permission denied. Please allow microphone access in browser settings.');
+        } else if (event.error !== 'no-speech') {
+          setSpeechError(`Speech recognition error: ${event.error}`);
+        }
+        setIsListening(false);
+      };
+
+      recognition.onend = () => {
+        setIsListening(false);
+      };
+
+      recognitionRef.current = recognition;
+      recognition.start();
+    } catch (err) {
+      console.error('Failed to start speech recognition:', err);
+      setSpeechError('Could not start speech recognition.');
+      setIsListening(false);
+    }
+  }
+
+  function insertSampleConflict() {
+    const sample = `[Sarah]: The launch date is now moved to November 22nd. No scope is being cut — the full feature set needs to ship. I'm making this call as PM.`;
+    setTranscript((prev) => (prev ? `${prev.trim()}\n${sample}` : sample));
+    if (!title) setTitle('Architecture & Scope Sync');
+    if (!meetingDate) setMeetingDate('2024-11-21');
+  }
 
   const isLoading = state.loading?.ingest === true;
 
@@ -759,6 +863,12 @@ function IngestForm({ state, actions }) {
   async function handleSubmit(e) {
     e.preventDefault();
     if (!transcript.trim()) return;
+    if (isListening && recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch (_) {}
+      setIsListening(false);
+    }
     await actions.ingestMeeting({ title, meeting_date: meetingDate, raw_transcript: transcript });
     setTitle('');
     setMeetingDate('');
@@ -799,12 +909,67 @@ function IngestForm({ state, actions }) {
           />
         </div>
 
+        {/* Transcript Section with Live Mic Header */}
         <div className="ws-form-field">
-          <label className="ws-form-label">Raw Transcript</label>
+          <div className="ws-mic-header-row">
+            <label className="ws-form-label" style={{ margin: 0 }}>
+              Raw Transcript
+            </label>
+
+            {/* Live Dictate Toggle Button */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <button
+                type="button"
+                className={`ws-btn-mic ${isListening ? 'active' : ''}`}
+                onClick={toggleDictation}
+                title={speechSupported ? 'Click to dictate live voice speech' : 'Speech recognition requires Chrome/Edge'}
+              >
+                <span className={`ws-mic-indicator ${isListening ? 'pulsing' : ''}`}>
+                  {isListening ? '🔴' : '🎙️'}
+                </span>
+                <span>{isListening ? 'Recording… (Click to Stop)' : '🎙️ Live Dictate Meeting'}</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Quick Speaker Selector Pills */}
+          <div className="ws-speaker-selector-bar">
+            <span className="ws-speaker-selector-label">Speaker:</span>
+            {SPEAKERS.map((spk) => {
+              const isSelected = activeSpeaker === spk;
+              return (
+                <button
+                  key={spk}
+                  type="button"
+                  className={`ws-speaker-pill ${isSelected ? 'active' : ''}`}
+                  onClick={() => setActiveSpeaker(spk)}
+                  title={`Prefix spoken lines with [${spk.split(' ')[0]}]:`}
+                >
+                  <span className="ws-speaker-dot" />
+                  {spk}
+                </button>
+              );
+            })}
+            <button
+              type="button"
+              className="ws-speaker-sample-btn"
+              onClick={insertSampleConflict}
+              title="Quickly insert a voice conflict sample for live judging"
+            >
+              ⚡ Insert Conflict Quote
+            </button>
+          </div>
+
+          {speechError && (
+            <div className="ws-mic-fallback-note">
+              <span>⚠️ {speechError}</span>
+            </div>
+          )}
+
           <textarea
             className="ws-form-textarea"
-            style={{ height: 220 }}
-            placeholder="Paste raw transcript here, or drag & drop a .txt / .md file below..."
+            style={{ height: 200 }}
+            placeholder="Paste raw transcript here, or dictate live using the mic above..."
             value={transcript}
             onChange={(e) => setTranscript(e.target.value)}
           />

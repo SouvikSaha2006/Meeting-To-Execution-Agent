@@ -4,6 +4,7 @@
 import React, { useEffect, useState, forwardRef, useImperativeHandle } from 'react';
 import { useWorkspace } from './useWorkspace.js';
 import { ToastContainer } from './ToastContainer.jsx';
+import { AskMemoryBar } from './AskMemoryBar.jsx';
 import { IngestTab } from './tabs/IngestTab.jsx';
 import { BoardTab } from './tabs/BoardTab.jsx';
 import { DecisionsTab } from './tabs/DecisionsTab.jsx';
@@ -181,6 +182,9 @@ export const VeriflowWorkspace = forwardRef(function VeriflowWorkspace(props, re
       <div id="conflict-guard" aria-hidden="true" style={{ position: 'relative', top: -100 }} />
       <div id="decision-log"   aria-hidden="true" style={{ position: 'relative', top: -100 }} />
       <div id="weekly-digest"  aria-hidden="true" style={{ position: 'relative', top: -100 }} />
+
+      {/* Floating Ask Meeting Memory Bar */}
+      <AskMemoryBar />
 
       {/* Toast notifications */}
       <ToastContainer

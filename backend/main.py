@@ -1533,6 +1533,7 @@ async def ask_memory(req: MemoryAskRequest, db: AsyncSession = Depends(get_db)):
     Query cross-meeting decisions, tasks, and transcripts using natural language.
     Strictly cites meeting title, meeting date, speaker, and verbatim quote.
     """
+    await seed_if_empty()
     return await ask_organizational_memory(question=req.question, db=db)
 
 

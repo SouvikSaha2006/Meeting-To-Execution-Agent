@@ -1976,6 +1976,7 @@
   color: #0D0D0C;
   font-weight: 450;
   margin-bottom: 14px;
+  white-space: pre-wrap;
 }
 
 .ws-memory-citations-section {

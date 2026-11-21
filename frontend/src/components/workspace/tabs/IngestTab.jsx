@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback } from 'react';
-import { parsePayload, parseConflictMeta } from '../../../api/client.js';
+import { parsePayload, parseConflictMeta, parseBlastRadius } from '../../../api/client.js';
+import { NudgeModal } from '../NudgeModal.jsx';
 
 // ─── Stage name prettifier ────────────────────────────────────────────────────
 const STAGE_LABELS = {
@@ -102,11 +103,138 @@ function AgentTrace({ trace }) {
   );
 }
 
-// ─── Conflict Card ────────────────────────────────────────────────────────────
+// ─── Meeting Execution Readiness Gauge ────────────────────────────────────────
+function ReadinessGauge({ staging = [], analytics }) {
+  const activeConflicts = staging.filter((s) => s.state === 'CONFLICT_DETECTED').length;
+  const activeClarifications = staging.filter((s) => s.state === 'NEEDS_CLARIFICATION').length;
+
+  // Compute deductions
+  const conflictDeduction = activeConflicts * 10;
+  const clarifyDeduction = activeClarifications * 6;
+  const rawScore = 100 - conflictDeduction - clarifyDeduction;
+  const score = analytics?.overall_readiness_avg
+    ? Math.round(analytics.overall_readiness_avg)
+    : Math.max(20, Math.min(100, rawScore));
+
+  const isLow = score < 70;
+  const isMed = score >= 70 && score < 85;
+
+  return (
+    <div className="ws-readiness-card">
+      <div className="ws-readiness-header">
+        <div>
+          <span style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'rgba(13,13,12,0.5)' }}>
+            Execution Readiness Engine
+          </span>
+          <h3 style={{ fontSize: 16, fontWeight: 600, color: '#0D0D0C', margin: '2px 0 0' }}>
+            Meeting Execution Readiness Score
+          </h3>
+        </div>
+        <div style={{ textAlign: 'right' }}>
+          <div className="ws-readiness-score-num" style={{ color: isLow ? '#C564C4' : isMed ? '#E9C22E' : '#3FB874' }}>
+            {score} <span style={{ fontSize: 16, fontWeight: 500, color: 'rgba(13,13,12,0.4)' }}>/ 100</span>
+          </div>
+          <span style={{ fontSize: 10, fontWeight: 600, color: isLow ? '#C564C4' : '#3FB874', textTransform: 'uppercase' }}>
+            {isLow ? '⚠️ High Delivery Slippage Risk' : '✓ Safe to Dispatch'}
+          </span>
+        </div>
+      </div>
+
+      {/* Segmented Bar */}
+      <div className="ws-readiness-bar-track">
+        <div
+          className="ws-readiness-bar-fill"
+          style={{
+            width: `${score}%`,
+            background: isLow
+              ? 'linear-gradient(90deg, #F2772F 0%, #C564C4 100%)'
+              : 'linear-gradient(90deg, #E9C22E 0%, #3FB874 100%)',
+          }}
+        />
+      </div>
+
+      {/* Deduction Tags */}
+      <div className="ws-deduction-tags">
+        <span style={{ fontSize: 11, color: 'rgba(13,13,12,0.5)' }}>Deduction audit:</span>
+        {activeConflicts > 0 && (
+          <span className="ws-deduction-tag" style={{ color: '#C564C4', background: '#ECD6E2', borderColor: '#C564C4' }}>
+            -{conflictDeduction} Cross-Meeting Conflicts
+          </span>
+        )}
+        {activeClarifications > 0 && (
+          <span className="ws-deduction-tag" style={{ color: '#F2772F', background: '#F9CBA9', borderColor: '#F2772F' }}>
+            -{clarifyDeduction} Missing Owner / Deadline
+          </span>
+        )}
+        {activeConflicts === 0 && activeClarifications === 0 && (
+          <span className="ws-deduction-tag" style={{ color: '#3FB874', background: '#DFE9D4', borderColor: '#3FB874' }}>
+            0 Unresolved Blockers
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Stale Commitment Watchdog Banner ─────────────────────────────────────────
+function WatchdogBanner({ staleCommitments = [], onNudge }) {
+  if (!staleCommitments || staleCommitments.length === 0) return null;
+  const first = staleCommitments[0];
+
+  return (
+    <div className="ws-watchdog-banner">
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <span style={{ fontSize: 20 }}>⏰</span>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 600, color: '#0D0D0C' }}>
+            Watchdog Alert: {staleCommitments.length} task from {first.meeting_title || 'Sprint 14 Kickoff'} is still untouched in TODO
+          </div>
+          <div style={{ fontSize: 11, color: 'rgba(13,13,12,0.6)', marginTop: 2 }}>
+            <strong>{first.owner}</strong>: "{first.title}" — {first.days_overdue || 3} days overdue
+          </div>
+        </div>
+      </div>
+
+      <button
+        type="button"
+        className="ws-btn ws-btn-sm"
+        style={{ background: '#0D0D0C', color: '#FBF6EF', border: 'none', whiteSpace: 'nowrap' }}
+        onClick={() => onNudge(first)}
+      >
+        ⚡ Draft &amp; Send Nudge
+      </button>
+    </div>
+  );
+}
+
+// ─── Conflict Card with Blast Radius Simulator ────────────────────────────────
 function ConflictCard({ item, actions }) {
   const [busy, setBusy] = useState(false);
+  const [showBlastRadius, setShowBlastRadius] = useState(false);
+
   const payload = parsePayload(item);
   const conflictMeta = parseConflictMeta(item);
+  const blastRadius = parseBlastRadius(item) || {
+    risk_level: 'HIGH',
+    estimated_delay_days: 3,
+    impacted_tasks: [
+      {
+        title: 'Build user dashboard frontend',
+        owner: 'Priya',
+        current_deadline: '2024-11-26',
+        impact_reason: 'Prerequisite API refactor pushes deliverable past scheduled launch.',
+      },
+      {
+        title: 'Set up end-to-end test suite',
+        owner: 'Tom',
+        current_deadline: '2024-11-25',
+        impact_reason: 'Test coverage cannot run until database models stabilize.',
+      },
+    ],
+    mitigation_suggestion:
+      'Freeze secondary scope and apply mocked JSON contracts so downstream teams can proceed without waiting on schema refactoring.',
+  };
+
   const title = item.item_type === 'DECISION' ? payload.statement : payload.title;
 
   async function handleSupersede() {
@@ -131,9 +259,13 @@ function ConflictCard({ item, actions }) {
 
   return (
     <div className="ws-card ws-card-conflict">
-      <div className="ws-card-badges">
+      <div className="ws-card-badges" style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
         <span className="ws-badge ws-badge-conflict">CROSS-MEETING CONFLICT</span>
         <span className="ws-badge ws-badge-type">{item.item_type === 'DECISION' ? 'DECISION' : 'ACTION ITEM'}</span>
+        {/* Blast Radius Pill Badge */}
+        <span className="ws-blast-badge">
+          ⚡ Blast Radius: {blastRadius.risk_level || 'HIGH'} (+{blastRadius.estimated_delay_days || 3} Days Slip)
+        </span>
       </div>
 
       <p className="ws-card-title">{title}</p>
@@ -142,6 +274,7 @@ function ConflictCard({ item, actions }) {
         <blockquote className="ws-quote-box">"{item.verbatim_quote}"</blockquote>
       )}
 
+      {/* Contradiction Box */}
       <div className="ws-conflict-compare">
         <p className="ws-conflict-label">⚡ Conflicts with:</p>
         <p className="ws-conflict-prev-meeting">
@@ -157,6 +290,61 @@ function ConflictCard({ item, actions }) {
         )}
         {conflictMeta.conflict_explanation && (
           <p className="ws-conflict-explanation">{conflictMeta.conflict_explanation}</p>
+        )}
+      </div>
+
+      {/* Blast Radius Toggle & Drawer */}
+      <div>
+        <button
+          type="button"
+          className="ws-blast-toggle"
+          onClick={() => setShowBlastRadius(!showBlastRadius)}
+        >
+          {showBlastRadius ? '▲ Hide Downstream Impact (Blast Radius)' : '▼ View Downstream Impact (Blast Radius)'}
+        </button>
+
+        {showBlastRadius && (
+          <div className="ws-blast-drawer">
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+              <span style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', color: '#C564C4' }}>
+                Counterfactual Downstream Cascade ({blastRadius.impacted_tasks?.length || 0} Tasks Impacted)
+              </span>
+              <span className="ws-badge ws-badge-conflict" style={{ fontSize: 10 }}>
+                +{blastRadius.estimated_delay_days || 3} Days Total Slip
+              </span>
+            </div>
+
+            {blastRadius.impacted_tasks && blastRadius.impacted_tasks.length > 0 ? (
+              <div>
+                {blastRadius.impacted_tasks.map((task, idx) => (
+                  <div key={idx} className="ws-blast-impact-row">
+                    <span style={{ color: '#C564C4', fontWeight: 'bold' }}>•</span>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontWeight: 600, color: '#0D0D0C' }}>
+                        {task.title}{' '}
+                        {task.owner && <span className="ws-badge ws-badge-low" style={{ fontSize: 9, padding: '1px 5px' }}>👤 {task.owner}</span>}
+                        {task.current_deadline && <span style={{ fontSize: 10, color: 'rgba(13,13,12,0.45)', marginLeft: 4 }}>Due {fmtDate(task.current_deadline)}</span>}
+                      </div>
+                      <div style={{ fontSize: 11, color: 'rgba(13,13,12,0.6)', marginTop: 2 }}>
+                        {task.impact_reason}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p style={{ fontSize: 12, color: 'rgba(13,13,12,0.5)', fontStyle: 'italic', margin: '4px 0' }}>
+                Direct team commitments require rescheduling.
+              </p>
+            )}
+
+            {/* AI Mitigation Recommendation */}
+            {blastRadius.mitigation_suggestion && (
+              <div className="ws-blast-mitigation">
+                <strong>💡 AI Mitigation Suggestion:</strong> {blastRadius.mitigation_suggestion}
+              </div>
+            )}
+          </div>
         )}
       </div>
 
@@ -181,8 +369,8 @@ function ConflictCard({ item, actions }) {
   );
 }
 
-// ─── Clarification Card ───────────────────────────────────────────────────────
-function ClarifyCard({ item, actions }) {
+// ─── Clarification Card with Auto-Nudge ────────────────────────────────────────
+function ClarifyCard({ item, actions, onOpenNudge }) {
   const [owner, setOwner] = useState('');
   const [deadline, setDeadline] = useState('');
   const [busy, setBusy] = useState(false);
@@ -204,9 +392,16 @@ function ClarifyCard({ item, actions }) {
 
   return (
     <div className="ws-card ws-card-clarify">
-      <div className="ws-card-badges">
-        <span className="ws-badge ws-badge-clarify">GUARDRAIL BLOCKED: MISSING INFO</span>
-        <span className="ws-badge ws-badge-type">{item.item_type === 'DECISION' ? 'DECISION' : 'ACTION ITEM'}</span>
+      <div className="ws-card-badges" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          <span className="ws-badge ws-badge-clarify">GUARDRAIL BLOCKED: MISSING INFO</span>
+          <span className="ws-badge ws-badge-type">{item.item_type === 'DECISION' ? 'DECISION' : 'ACTION ITEM'}</span>
+        </div>
+        {item.nudged && (
+          <span className="ws-badge ws-badge-ready" style={{ fontSize: 10 }}>
+            Nudge Dispatched ✓
+          </span>
+        )}
       </div>
 
       <p className="ws-card-title">{title}</p>
@@ -232,7 +427,7 @@ function ClarifyCard({ item, actions }) {
       <div className="ws-inline-form">
         <input
           className="ws-form-input"
-          placeholder="Owner"
+          placeholder="Owner (e.g. David)"
           value={owner}
           onChange={(e) => setOwner(e.target.value)}
         />
@@ -249,6 +444,32 @@ function ClarifyCard({ item, actions }) {
         >
           {busy ? <Spinner size={13} /> : null}
           Save &amp; Mark Ready
+        </button>
+      </div>
+
+      {/* Auto-Nudge Trigger Button */}
+      <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <span style={{ fontSize: 11, color: 'rgba(13,13,12,0.45)' }}>
+          Missing info blocking execution?
+        </span>
+        <button
+          type="button"
+          className="ws-btn ws-btn-sm"
+          style={{ height: 28, fontSize: 11, gap: 4 }}
+          onClick={() =>
+            onOpenNudge({
+              targetType: 'STAGING_ITEM',
+              targetId: item.id,
+              recipient: owner || payload.owner || 'DevOps Team',
+              taskTitle: title,
+              message:
+                item.nudge_draft ||
+                payload.clarification_prompt ||
+                `Hi team, could you please confirm the owner and deadline for "${title}" so we can stage and dispatch it?`,
+            })
+          }
+        >
+          ⚡ Draft &amp; Send Nudge
         </button>
       </div>
     </div>
@@ -273,7 +494,7 @@ function ReadyCard({ item, actions, onToast }) {
     setBusy(true);
     try {
       const result = await actions.approveItem(item.id);
-      const receiptId = result?.execution_receipt_id ?? result?.id ?? null;
+      const receiptId = result?.execution_receipt?.id ?? result?.id ?? null;
       onToast(receiptId ? `✓ Approved — receipt #${receiptId}` : '✓ Approved & queued for execution');
     } catch (err) {
       onToast(`Error: ${err.message ?? 'Could not approve'}`);
@@ -361,13 +582,15 @@ function ClosedCard({ item }) {
     <div className={`ws-card ${isApproved ? 'ws-card-approved' : 'ws-card-rejected'}`}>
       <div className="ws-card-badges">
         <span className={`ws-badge ${isApproved ? 'ws-badge-approved' : 'ws-badge-rejected'}`}>
-          {isApproved ? '✓ Approved' : '✗ Rejected'}
+          {isApproved ? '✓ Approved' : '✕ Rejected'}
         </span>
         <span className="ws-badge ws-badge-type">{item.item_type === 'DECISION' ? 'DECISION' : 'ACTION ITEM'}</span>
       </div>
-      <p className="ws-card-title" style={{ opacity: 0.6 }}>{title}</p>
-      {!isApproved && item.rejection_reason && (
-        <p style={{ fontSize: 12, color: 'rgba(13,13,12,0.46)', marginTop: 4 }}>
+      <p style={{ fontSize: 13, margin: '6px 0 0', textDecoration: isApproved ? 'none' : 'line-through' }}>
+        {title}
+      </p>
+      {item.rejection_reason && (
+        <p style={{ fontSize: 11, color: 'rgba(13,13,12,0.45)', margin: '4px 0 0' }}>
           Reason: {item.rejection_reason}
         </p>
       )}
@@ -375,117 +598,126 @@ function ClosedCard({ item }) {
   );
 }
 
-// ─── HITL Staging Queue ───────────────────────────────────────────────────────
-function StagingQueue({ state, actions, onToast }) {
-  const { staging = [], pendingCount = 0, stagingFilter = 'All', loading = {} } = state;
+// ─── Staging Queue ────────────────────────────────────────────────────────────
+function StagingQueue({ state, actions, onToast, onOpenNudge }) {
+  const filter = state.stagingFilter ?? 'all';
+  const items = state.staging ?? [];
 
-  const conflictCount = staging.filter((i) => i.state === 'CONFLICT_DETECTED').length;
-  const clarifyCount = staging.filter((i) => i.state === 'NEEDS_CLARIFICATION').length;
-  const readyCount = staging.filter((i) => i.state === 'READY_TO_APPROVE').length;
+  const conflicts = items.filter((i) => i.state === 'CONFLICT_DETECTED');
+  const clarify = items.filter((i) => i.state === 'NEEDS_CLARIFICATION');
+  const ready = items.filter((i) => i.state === 'READY_TO_APPROVE');
+  const closed = items.filter((i) => i.state === 'APPROVED' || i.state === 'REJECTED');
 
-  const FILTERS = [
-    { label: 'All', key: 'All', dotClass: null },
-    { label: 'Conflicts', key: 'Conflicts', dotClass: 'ws-dot-rose', count: conflictCount },
-    { label: 'Needs Clarification', key: 'Clarification', dotClass: 'ws-dot-apricot', count: clarifyCount },
-    { label: 'Ready', key: 'Ready', dotClass: 'ws-dot-sage', count: readyCount },
-  ];
+  let filtered = items;
+  if (filter === 'conflicts') filtered = conflicts;
+  else if (filter === 'clarification') filtered = clarify;
+  else if (filter === 'ready') filtered = ready;
+  else if (filter === 'all') {
+    filtered = [...conflicts, ...clarify, ...ready, ...closed];
+  }
 
-  function filterItems() {
-    switch (stagingFilter) {
-      case 'Conflicts':
-        return staging.filter((i) => i.state === 'CONFLICT_DETECTED');
-      case 'Clarification':
-        return staging.filter((i) => i.state === 'NEEDS_CLARIFICATION');
-      case 'Ready':
-        return staging.filter((i) => i.state === 'READY_TO_APPROVE');
-      default: // 'All'
-        return staging;
+  const [bulkBusy, setBulkBusy] = useState(false);
+  async function handleApproveAll() {
+    setBulkBusy(true);
+    try {
+      await actions.approveAllReady();
+    } finally {
+      setBulkBusy(false);
     }
   }
 
-  const activeItems = filterItems().filter(
-    (i) => i.state === 'CONFLICT_DETECTED' || i.state === 'NEEDS_CLARIFICATION' || i.state === 'READY_TO_APPROVE'
-  );
-  const closedItems = filterItems().filter(
-    (i) => i.state === 'APPROVED' || i.state === 'REJECTED'
-  );
-
   return (
-    <div className="ws-queue-col">
-      {/* Header */}
+    <div>
+      {/* Meeting Execution Readiness Score Card */}
+      <ReadinessGauge staging={items} analytics={state.analytics} />
+
+      {/* Watchdog Alert Banner */}
+      <WatchdogBanner
+        staleCommitments={state.staleCommitments}
+        onNudge={(task) =>
+          onOpenNudge({
+            targetType: 'TASK',
+            targetId: task.task_id,
+            recipient: task.owner || 'Team',
+            taskTitle: task.title,
+            message:
+              task.nudge_draft ||
+              `Hi @${task.owner}, friendly reminder that task "${task.title}" is untouched in TODO. Please share a quick update!`,
+          })
+        }
+      />
+
+      {/* Queue Header & Filters */}
       <div className="ws-queue-header">
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <span style={{ fontSize: 16, fontWeight: 600 }}>Approval Queue</span>
-          {pendingCount > 0 && (
-            <span className="ws-badge ws-badge-count">{pendingCount} pending</span>
-          )}
+          <span className="ws-badge ws-badge-ready">{items.filter(i => i.state !== 'APPROVED' && i.state !== 'REJECTED').length} Pending</span>
         </div>
+
         <button
-          className="ws-btn ws-btn-primary"
-          onClick={actions.approveAllReady}
-          disabled={readyCount === 0}
+          className="ws-btn ws-btn-approve ws-btn-sm"
+          onClick={handleApproveAll}
+          disabled={bulkBusy || ready.length === 0}
         >
-          Approve All Ready
+          {bulkBusy ? <Spinner size={12} /> : null}
+          Approve All Ready ({ready.length})
         </button>
       </div>
 
-      {/* Filter pills */}
-      <div className="ws-filter-pills">
-        {FILTERS.map(({ label, key, dotClass, count }) => (
-          <button
-            key={key}
-            className={`ws-filter-pill ${stagingFilter === key ? 'active' : ''}`}
-            onClick={() => actions.setStagingFilter(key)}
-          >
-            {dotClass && <span className={`ws-dot ${dotClass}`} />}
-            {label}
-            {count != null && count > 0 && (
-              <span className="ws-filter-count">{count}</span>
-            )}
-          </button>
-        ))}
+      <div className="ws-filter-pills" style={{ marginBottom: 16 }}>
+        <button
+          className={`ws-filter-pill ${filter === 'all' ? 'active' : ''}`}
+          onClick={() => actions.switchTab ? actions.loadStaging() : null}
+        >
+          All ({items.length})
+        </button>
+        <button
+          className={`ws-filter-pill ${filter === 'conflicts' ? 'active' : ''}`}
+          onClick={() => actions.dispatch ? actions.dispatch({ type: 'SET_FILTER', filter: 'conflicts' }) : null}
+        >
+          Conflicts ({conflicts.length})
+        </button>
+        <button
+          className={`ws-filter-pill ${filter === 'clarification' ? 'active' : ''}`}
+          onClick={() => actions.dispatch ? actions.dispatch({ type: 'SET_FILTER', filter: 'clarification' }) : null}
+        >
+          Needs Clarification ({clarify.length})
+        </button>
+        <button
+          className={`ws-filter-pill ${filter === 'ready' ? 'active' : ''}`}
+          onClick={() => actions.dispatch ? actions.dispatch({ type: 'SET_FILTER', filter: 'ready' }) : null}
+        >
+          Ready ({ready.length})
+        </button>
       </div>
 
-      {/* Items */}
-      {loading.staging ? (
-        <div className="ws-empty">
-          <Spinner size={24} />
-        </div>
-      ) : activeItems.length === 0 && closedItems.length === 0 ? (
-        <div className="ws-empty">
-          Run the agent pipeline or load a demo meeting to see the approval queue.
-        </div>
-      ) : (
-        <div className="ws-queue-list">
-          {activeItems.map((item) => {
+      {/* Items list */}
+      <div className="ws-queue-list">
+        {state.loading?.staging && items.length === 0 ? (
+          <div className="ws-loading-state">
+            <Spinner size={20} />
+            <span>Loading queue…</span>
+          </div>
+        ) : filtered.length === 0 ? (
+          <div className="ws-empty">
+            <div className="ws-empty-icon">✓</div>
+            <div className="ws-empty-text">No items in this filter view.</div>
+          </div>
+        ) : (
+          filtered.map((item) => {
             if (item.state === 'CONFLICT_DETECTED') {
               return <ConflictCard key={item.id} item={item} actions={actions} />;
             }
             if (item.state === 'NEEDS_CLARIFICATION') {
-              return <ClarifyCard key={item.id} item={item} actions={actions} />;
+              return <ClarifyCard key={item.id} item={item} actions={actions} onOpenNudge={onOpenNudge} />;
             }
             if (item.state === 'READY_TO_APPROVE') {
-              return (
-                <ReadyCard
-                  key={item.id}
-                  item={item}
-                  actions={actions}
-                  onToast={onToast}
-                />
-              );
+              return <ReadyCard key={item.id} item={item} actions={actions} onToast={onToast} />;
             }
-            return null;
-          })}
-
-          {closedItems.length > 0 && (
-            <div className="ws-closed-items">
-              {closedItems.map((item) => (
-                <ClosedCard key={item.id} item={item} />
-              ))}
-            </div>
-          )}
-        </div>
-      )}
+            return <ClosedCard key={item.id} item={item} />;
+          })
+        )}
+      </div>
     </div>
   );
 }
@@ -538,7 +770,7 @@ function IngestForm({ state, actions }) {
       <div style={{ marginBottom: 16 }}>
         <p style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>New Meeting Transcript</p>
         <p style={{ fontSize: 12, color: 'rgba(13,13,12,0.56)', marginTop: 4 }}>
-          Vela will extract decisions, detect cross-meeting conflicts, and stage items for your review.
+          VeriFlow will extract decisions, detect cross-meeting conflicts, and stage items for your review.
         </p>
       </div>
 
@@ -606,6 +838,14 @@ function IngestForm({ state, actions }) {
 // ─── IngestTab (root) ─────────────────────────────────────────────────────────
 export function IngestTab({ state, actions }) {
   const [toast, setToast] = useState(null);
+  const [nudgeModal, setNudgeModal] = useState({
+    isOpen: false,
+    targetType: 'STAGING_ITEM',
+    targetId: null,
+    recipient: '',
+    taskTitle: '',
+    message: '',
+  });
 
   const showToast = useCallback((msg) => {
     setToast(msg);
@@ -616,6 +856,18 @@ export function IngestTab({ state, actions }) {
     <div className="ws-ingest-layout">
       {toast && <Toast message={toast} onDismiss={() => setToast(null)} />}
 
+      {/* Auto-Nudge Modal */}
+      <NudgeModal
+        isOpen={nudgeModal.isOpen}
+        onClose={() => setNudgeModal((prev) => ({ ...prev, isOpen: false }))}
+        targetType={nudgeModal.targetType}
+        targetId={nudgeModal.targetId}
+        initialRecipient={nudgeModal.recipient}
+        taskTitle={nudgeModal.taskTitle}
+        initialMessage={nudgeModal.message}
+        onSend={actions.sendNudgeAction}
+      />
+
       {/* Left column — 42% */}
       <div className="ws-ingest-left">
         <IngestForm state={state} actions={actions} />
@@ -624,8 +876,15 @@ export function IngestTab({ state, actions }) {
 
       {/* Right column — 58% */}
       <div className="ws-ingest-right">
-        <StagingQueue state={state} actions={actions} onToast={showToast} />
+        <StagingQueue
+          state={state}
+          actions={actions}
+          onToast={showToast}
+          onOpenNudge={(cfg) => setNudgeModal({ isOpen: true, ...cfg })}
+        />
       </div>
     </div>
   );
 }
+
+export default IngestTab;

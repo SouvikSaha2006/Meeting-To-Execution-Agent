@@ -41,9 +41,10 @@ async function request(method, path, body) {
 }
 
 // ---------------------------------------------------------------------------
-// Health
+// Health & Analytics
 // ---------------------------------------------------------------------------
 export const getHealth = () => request('GET', '/api/health');
+export const getAnalyticsHealth = () => request('GET', '/api/analytics/health');
 
 // ---------------------------------------------------------------------------
 // Ingest
@@ -86,6 +87,20 @@ export const rejectItem = (id, body) =>
 export const approveAllReady = () =>
   request('POST', '/api/staging/approve-all-ready');
 
+export const getItemBlastRadius = (id) =>
+  request('GET', `/api/staging/${id}/blast-radius`);
+
+// ---------------------------------------------------------------------------
+// Auto-Nudge & Escalation
+// ---------------------------------------------------------------------------
+/**
+ * @param {{ target_type: 'STAGING_ITEM'|'TASK', target_id: number,
+ *           recipient: string, channel: 'slack'|'discord'|'email',
+ *           message?: string }} body
+ */
+export const sendNudge = (body) =>
+  request('POST', '/api/actions/send-nudge', body);
+
 // ---------------------------------------------------------------------------
 // Tasks board
 // ---------------------------------------------------------------------------
@@ -102,6 +117,12 @@ export const updateTaskStatus = (id, status) =>
 // Decisions ledger
 // ---------------------------------------------------------------------------
 export const getDecisions = () => request('GET', '/api/decisions');
+
+// ---------------------------------------------------------------------------
+// Lineage Graph
+// ---------------------------------------------------------------------------
+export const getLineageGraph = (meetingId) =>
+  request('GET', meetingId ? `/api/graph/lineage?meeting_id=${meetingId}` : '/api/graph/lineage');
 
 // ---------------------------------------------------------------------------
 // Weekly digest
@@ -138,4 +159,23 @@ export function parseConflictMeta(staging_item) {
   } catch (_) {
     return {};
   }
+}
+
+/**
+ * Safely extract blast radius from a staging item.
+ * @param {{ blast_radius?: object, blast_radius_json?: string }} staging_item
+ * @returns {object|null}
+ */
+export function parseBlastRadius(staging_item) {
+  if (staging_item?.blast_radius && typeof staging_item.blast_radius === 'object') {
+    return staging_item.blast_radius;
+  }
+  if (staging_item?.blast_radius_json) {
+    try {
+      return JSON.parse(staging_item.blast_radius_json);
+    } catch (_) {
+      return null;
+    }
+  }
+  return null;
 }

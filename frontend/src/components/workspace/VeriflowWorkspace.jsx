@@ -8,6 +8,7 @@ import { IngestTab } from './tabs/IngestTab.jsx';
 import { BoardTab } from './tabs/BoardTab.jsx';
 import { DecisionsTab } from './tabs/DecisionsTab.jsx';
 import { DigestTab } from './tabs/DigestTab.jsx';
+import { LineageTab } from './tabs/LineageTab.jsx';
 import './workspace.css';
 
 const TABS = [
@@ -15,6 +16,7 @@ const TABS = [
   { id: 'board',     label: 'Execution Board',         badge: false },
   { id: 'decisions', label: 'Decision Memory',         badge: false },
   { id: 'digest',    label: 'Weekly Digest',           badge: false },
+  { id: 'lineage',   label: 'Lineage Graph',           badge: false },
 ];
 
 export const VeriflowWorkspace = forwardRef(function VeriflowWorkspace(props, ref) {
@@ -22,9 +24,10 @@ export const VeriflowWorkspace = forwardRef(function VeriflowWorkspace(props, re
   const [demo1Loading, setDemo1Loading] = useState(false);
   const [demo2Loading, setDemo2Loading] = useState(false);
 
-  // On mount: load staging queue to populate pending badge
+  // On mount: load staging queue & analytics to populate pending badge and readiness
   useEffect(() => {
     actions.loadStaging();
+    actions.loadAnalytics();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -78,6 +81,8 @@ export const VeriflowWorkspace = forwardRef(function VeriflowWorkspace(props, re
         return <DecisionsTab state={state} actions={actions} />;
       case 'digest':
         return <DigestTab state={state} actions={actions} />;
+      case 'lineage':
+        return <LineageTab state={state} actions={actions} />;
       default:
         return <IngestTab state={state} actions={actions} />;
     }

@@ -5,11 +5,14 @@ import { useReducer, useCallback, useRef } from 'react';
 import * as api from '../../api/client.js';
 
 const initialState = {
-  activeTab: 'ingest', // 'ingest' | 'board' | 'decisions' | 'digest'
+  activeTab: 'ingest', // 'ingest' | 'board' | 'decisions' | 'digest' | 'lineage'
   staging: [],
   tasks: [],
   decisions: [],
   digest: null,
+  lineageGraph: null,
+  analytics: null,
+  staleCommitments: [],
   stagingFilter: 'all', // 'all' | 'conflicts' | 'clarification' | 'ready'
   loading: {
     staging: false,
@@ -18,6 +21,9 @@ const initialState = {
     digest: false,
     ingest: false,
     demo: false,
+    lineage: false,
+    analytics: false,
+    nudge: false,
   },
   error: null,
   toasts: [],
@@ -53,6 +59,44 @@ function workspaceReducer(state, action) {
 
     case 'SET_DIGEST':
       return { ...state, digest: action.digest };
+
+    case 'SET_LINEAGE_GRAPH':
+      return { ...state, lineageGraph: action.graph };
+
+    case 'SET_ANALYTICS':
+      return {
+        ...state,
+        analytics: action.analytics,
+        staleCommitments: action.analytics?.stale_tasks || state.staleCommitments,
+      };
+
+    case 'SET_STALE_COMMITMENTS':
+      return { ...state, staleCommitments: action.commitments || [] };
+
+    case 'MARK_NUDGED': {
+      // Mark either a staging item or task as nudged
+      const staging = state.staging.map((item) =>
+        action.targetType === 'STAGING_ITEM' && item.id === action.targetId
+          ? { ...item, nudged: true, nudge_receipt_json: JSON.stringify(action.receipt) }
+          : item
+      );
+      const tasks = state.tasks.map((task) =>
+        action.targetType === 'TASK' && task.id === action.targetId
+          ? { ...task, nudged: true, nudge_receipt_json: JSON.stringify(action.receipt) }
+          : task
+      );
+      const staleCommitments = state.staleCommitments.map((stale) =>
+        action.targetType === 'TASK' && stale.task_id === action.targetId
+          ? { ...stale, nudged: true }
+          : stale
+      );
+      return {
+        ...state,
+        staging,
+        tasks,
+        staleCommitments,
+      };
+    }
 
     case 'SET_FILTER':
       return { ...state, stagingFilter: action.filter };
@@ -174,6 +218,60 @@ export function useWorkspace() {
     }
   }, [addToast]);
 
+  const loadLineageGraph = useCallback(async (meetingId = null) => {
+    dispatch({ type: 'SET_LOADING', key: 'lineage', value: true });
+    try {
+      const data = await api.getLineageGraph(meetingId);
+      dispatch({ type: 'SET_LINEAGE_GRAPH', graph: data });
+    } catch (err) {
+      dispatch({ type: 'SET_ERROR', error: err?.detail || 'Failed to build lineage graph.' });
+      addToast(err?.detail || 'Could not load decision lineage graph', 'error');
+    } finally {
+      dispatch({ type: 'SET_LOADING', key: 'lineage', value: false });
+    }
+  }, [addToast]);
+
+  const loadAnalytics = useCallback(async () => {
+    dispatch({ type: 'SET_LOADING', key: 'analytics', value: true });
+    try {
+      const data = await api.getAnalyticsHealth();
+      dispatch({ type: 'SET_ANALYTICS', analytics: data });
+      if (data?.stale_tasks) {
+        dispatch({ type: 'SET_STALE_COMMITMENTS', commitments: data.stale_tasks });
+      }
+    } catch (err) {
+      // analytics optional fail
+    } finally {
+      dispatch({ type: 'SET_LOADING', key: 'analytics', value: false });
+    }
+  }, []);
+
+  const sendNudgeAction = useCallback(async ({ target_type, target_id, recipient, channel = 'slack', message }) => {
+    dispatch({ type: 'SET_LOADING', key: 'nudge', value: true });
+    try {
+      const res = await api.sendNudge({
+        target_type,
+        target_id,
+        recipient,
+        channel,
+        message,
+      });
+      dispatch({
+        type: 'MARK_NUDGED',
+        targetType: target_type,
+        targetId: target_id,
+        receipt: res.receipt,
+      });
+      addToast(`Nudge dispatched via ${channel.toUpperCase()} to @${recipient} ✓`, 'success');
+      return res;
+    } catch (err) {
+      addToast(err?.detail || 'Failed to dispatch nudge.', 'error');
+      throw err;
+    } finally {
+      dispatch({ type: 'SET_LOADING', key: 'nudge', value: false });
+    }
+  }, [addToast]);
+
   const ingestMeeting = useCallback(async (formData) => {
     dispatch({ type: 'SET_LOADING', key: 'ingest', value: true });
     dispatch({ type: 'SET_ERROR', error: null });
@@ -182,10 +280,12 @@ export function useWorkspace() {
       if (res?.agent_trace) {
         dispatch({ type: 'SET_TRACE', trace: res.agent_trace });
       }
+      if (res?.stale_commitments) {
+        dispatch({ type: 'SET_STALE_COMMITMENTS', commitments: res.stale_commitments });
+      }
       addToast(`Pipeline executed for "${formData.title}"`, 'success');
-      // Reload staging & tasks
-      await loadStaging();
-      await loadTasks();
+      // Reload staging, tasks, analytics, lineage
+      await Promise.all([loadStaging(), loadTasks(), loadAnalytics()]);
       return res;
     } catch (err) {
       const msg = err?.detail || 'Ingestion pipeline failed.';
@@ -195,7 +295,7 @@ export function useWorkspace() {
     } finally {
       dispatch({ type: 'SET_LOADING', key: 'ingest', value: false });
     }
-  }, [addToast, loadStaging, loadTasks]);
+  }, [addToast, loadStaging, loadTasks, loadAnalytics]);
 
   const approveItem = useCallback(async (id) => {
     try {
@@ -209,13 +309,13 @@ export function useWorkspace() {
         toastMsg = `Approved! Dispatched to ${rcpt.channel || 'Webhook'} (Receipt #${rcpt.id || id})`;
       }
       addToast(toastMsg, 'success');
-      await loadTasks();
+      await Promise.all([loadTasks(), loadAnalytics()]);
       return res;
     } catch (err) {
       addToast(err?.detail || 'Failed to approve item.', 'error');
       throw err;
     }
-  }, [addToast, loadTasks]);
+  }, [addToast, loadTasks, loadAnalytics]);
 
   const rejectItem = useCallback(async (id, reason = 'Rejected by reviewer') => {
     try {
@@ -224,12 +324,13 @@ export function useWorkspace() {
         dispatch({ type: 'UPDATE_STAGING_ITEM', item: res });
       }
       addToast('Item rejected and archived', 'info');
+      await loadAnalytics();
       return res;
     } catch (err) {
       addToast(err?.detail || 'Failed to reject item.', 'error');
       throw err;
     }
-  }, [addToast]);
+  }, [addToast, loadAnalytics]);
 
   const resolveItem = useCallback(async (id, body) => {
     try {
@@ -250,14 +351,13 @@ export function useWorkspace() {
       const res = await api.approveAllReady();
       const count = res?.approved_count ?? 0;
       addToast(`Bulk Approved ${count} ready items!`, 'success');
-      await loadStaging();
-      await loadTasks();
+      await Promise.all([loadStaging(), loadTasks(), loadAnalytics()]);
       return res;
     } catch (err) {
       addToast(err?.detail || 'Bulk approval failed.', 'error');
       throw err;
     }
-  }, [addToast, loadStaging, loadTasks]);
+  }, [addToast, loadStaging, loadTasks, loadAnalytics]);
 
   const moveTask = useCallback(async (id, status) => {
     try {
@@ -266,68 +366,69 @@ export function useWorkspace() {
         dispatch({ type: 'UPDATE_TASK', task: res });
       }
       addToast(`Task moved to ${status.replace('_', ' ')}`, 'info');
+      await loadAnalytics();
       return res;
     } catch (err) {
       addToast(err?.detail || 'Failed to update task status.', 'error');
       throw err;
     }
-  }, [addToast]);
+  }, [addToast, loadAnalytics]);
 
   const runDemo1 = useCallback(async () => {
     dispatch({ type: 'SET_LOADING', key: 'demo', value: true });
     try {
       const res = await api.loadMeeting1();
       addToast('Sprint Kickoff (Nov 14) pre-seeded successfully!', 'success');
-      await loadStaging();
-      await loadTasks();
-      await loadDecisions();
+      await Promise.all([loadStaging(), loadTasks(), loadDecisions(), loadAnalytics()]);
       return res;
     } catch (err) {
       addToast(err?.detail || 'Failed to load Demo 1.', 'error');
     } finally {
       dispatch({ type: 'SET_LOADING', key: 'demo', value: false });
     }
-  }, [addToast, loadStaging, loadTasks, loadDecisions]);
+  }, [addToast, loadStaging, loadTasks, loadDecisions, loadAnalytics]);
 
   const runDemo2 = useCallback(async () => {
     dispatch({ type: 'SET_LOADING', key: 'demo', value: true });
     try {
       const res = await api.loadMeeting2();
+      if (res?.stale_commitments) {
+        dispatch({ type: 'SET_STALE_COMMITMENTS', commitments: res.stale_commitments });
+      }
       addToast('Tech Sync (Nov 21) loaded! Cross-meeting conflicts detected ⚡', 'error');
-      await loadStaging();
-      await loadTasks();
-      await loadDecisions();
+      await Promise.all([loadStaging(), loadTasks(), loadDecisions(), loadAnalytics()]);
       return res;
     } catch (err) {
       addToast(err?.detail || 'Failed to load Demo 2.', 'error');
     } finally {
       dispatch({ type: 'SET_LOADING', key: 'demo', value: false });
     }
-  }, [addToast, loadStaging, loadTasks, loadDecisions]);
+  }, [addToast, loadStaging, loadTasks, loadDecisions, loadAnalytics]);
 
   const resetDemo = useCallback(async () => {
     dispatch({ type: 'SET_LOADING', key: 'demo', value: true });
     try {
-      await api.resetDemo();
-      dispatch({ type: 'RESET_ALL' });
-      addToast('Database reset to clean state', 'info');
-      await loadStaging();
-      await loadTasks();
-      await loadDecisions();
+      const res = await api.resetDemo();
+      if (res?.meeting_2?.stale_commitments) {
+        dispatch({ type: 'SET_STALE_COMMITMENTS', commitments: res.meeting_2.stale_commitments });
+      }
+      addToast('Database reset with demo scenarios & conflicts', 'info');
+      await Promise.all([loadStaging(), loadTasks(), loadDecisions(), loadAnalytics()]);
     } catch (err) {
       addToast(err?.detail || 'Failed to reset demo.', 'error');
     } finally {
       dispatch({ type: 'SET_LOADING', key: 'demo', value: false });
     }
-  }, [addToast, loadStaging, loadTasks, loadDecisions]);
+  }, [addToast, loadStaging, loadTasks, loadDecisions, loadAnalytics]);
 
   const switchTab = useCallback((tab) => {
     dispatch({ type: 'SET_TAB', tab });
-    if (tab === 'ingest') loadStaging();
-    if (tab === 'board') loadTasks();
+    if (tab === 'ingest') { loadStaging(); loadAnalytics(); }
+    if (tab === 'board') { loadTasks(); loadAnalytics(); }
     if (tab === 'decisions') loadDecisions();
     if (tab === 'digest') loadDigest();
-  }, [loadStaging, loadTasks, loadDecisions, loadDigest]);
+    if (tab === 'lineage') loadLineageGraph();
+  }, [loadStaging, loadAnalytics, loadTasks, loadDecisions, loadDigest, loadLineageGraph]);
 
   return {
     state,
@@ -337,6 +438,9 @@ export function useWorkspace() {
       loadTasks,
       loadDecisions,
       loadDigest,
+      loadLineageGraph,
+      loadAnalytics,
+      sendNudgeAction,
       ingestMeeting,
       approveItem,
       rejectItem,

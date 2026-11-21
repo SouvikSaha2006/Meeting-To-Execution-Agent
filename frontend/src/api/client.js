@@ -102,6 +102,21 @@ export const sendNudge = (body) =>
   request('POST', '/api/actions/send-nudge', body);
 
 // ---------------------------------------------------------------------------
+// Proactive Deadline Reminders
+// ---------------------------------------------------------------------------
+export const getUpcomingReminders = (withinHours = 48) =>
+  request('GET', `/api/reminders/upcoming?within_hours=${withinHours}`);
+
+export const dispatchAllReminders = (withinHours = 48) =>
+  request('POST', `/api/reminders/dispatch-all?within_hours=${withinHours}`);
+
+export const sendTaskReminder = (taskId, channel = 'webhook') =>
+  request('POST', `/api/reminders/${taskId}/send?channel=${channel}`);
+
+export const getReminderLogs = (limit = 50) =>
+  request('GET', `/api/reminders/logs?limit=${limit}`);
+
+// ---------------------------------------------------------------------------
 // Tasks board
 // ---------------------------------------------------------------------------
 export const getTasks = () => request('GET', '/api/tasks');

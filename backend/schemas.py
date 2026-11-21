@@ -377,6 +377,7 @@ class UpcomingReminderItem(BaseModel):
     owner: Optional[str] = None
     deadline_iso: str
     hours_remaining: int
+    countdown_label: Optional[str] = None
     urgency: Literal["OVERDUE", "CRITICAL_DUE_SOON", "UPCOMING"]
     reminder_sent: bool
     suggested_message: str

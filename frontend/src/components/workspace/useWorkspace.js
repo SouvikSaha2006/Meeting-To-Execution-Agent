@@ -13,6 +13,8 @@ const initialState = {
   lineageGraph: null,
   analytics: null,
   staleCommitments: [],
+  upcomingReminders: [],
+  upcomingRemindersCount: 0,
   stagingFilter: 'all', // 'all' | 'conflicts' | 'clarification' | 'ready'
   loading: {
     staging: false,
@@ -24,6 +26,7 @@ const initialState = {
     lineage: false,
     analytics: false,
     nudge: false,
+    reminders: false,
   },
   error: null,
   toasts: [],
@@ -72,6 +75,56 @@ function workspaceReducer(state, action) {
 
     case 'SET_STALE_COMMITMENTS':
       return { ...state, staleCommitments: action.commitments || [] };
+
+    case 'SET_UPCOMING_REMINDERS': {
+      const reminders = action.reminders || [];
+      return {
+        ...state,
+        upcomingReminders: reminders,
+        upcomingRemindersCount: reminders.length,
+      };
+    }
+
+    case 'MARK_REMINDER_SENT': {
+      const { taskId, timestamp } = action;
+      const upcomingReminders = state.upcomingReminders.map((r) =>
+        r.task_id === taskId
+          ? { ...r, reminder_sent: true, reminder_sent_at: timestamp }
+          : r
+      );
+      const tasks = state.tasks.map((t) =>
+        t.id === taskId
+          ? { ...t, reminder_sent: true, reminder_sent_at: timestamp }
+          : t
+      );
+      return {
+        ...state,
+        upcomingReminders,
+        tasks,
+      };
+    }
+
+    case 'MARK_ALL_REMINDERS_SENT': {
+      const { timestamp, items } = action;
+      const upcomingReminders = (items && items.length > 0)
+        ? items
+        : state.upcomingReminders.map((r) => ({
+            ...r,
+            reminder_sent: true,
+            reminder_sent_at: timestamp,
+          }));
+      const sentIds = new Set(upcomingReminders.map((u) => u.task_id));
+      const tasks = state.tasks.map((t) =>
+        sentIds.has(t.id)
+          ? { ...t, reminder_sent: true, reminder_sent_at: timestamp }
+          : t
+      );
+      return {
+        ...state,
+        upcomingReminders,
+        tasks,
+      };
+    }
 
     case 'MARK_NUDGED': {
       // Mark either a staging item or task as nudged
@@ -272,6 +325,65 @@ export function useWorkspace() {
     }
   }, [addToast]);
 
+  const loadUpcomingReminders = useCallback(async () => {
+    try {
+      const res = await api.getUpcomingReminders();
+      const list = res?.reminders || [];
+      dispatch({ type: 'SET_UPCOMING_REMINDERS', reminders: list });
+      return list;
+    } catch (err) {
+      console.warn('Failed to load upcoming reminders', err);
+    }
+  }, []);
+
+  const dispatchAllRemindersAction = useCallback(async () => {
+    dispatch({ type: 'SET_LOADING', key: 'reminders', value: true });
+    try {
+      const res = await api.dispatchAllReminders();
+      const count = res?.dispatched_count ?? res?.count ?? 0;
+      const nowIso = new Date().toISOString();
+      const timeStr = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+
+      dispatch({
+        type: 'MARK_ALL_REMINDERS_SENT',
+        timestamp: nowIso,
+      });
+
+      await loadUpcomingReminders();
+
+      addToast(
+        `Pre-deadline reminders dispatched at ${timeStr} (${count} notified) ✓`,
+        'success'
+      );
+      return res;
+    } catch (err) {
+      addToast(err?.detail || 'Failed to dispatch deadline reminders.', 'error');
+      throw err;
+    } finally {
+      dispatch({ type: 'SET_LOADING', key: 'reminders', value: false });
+    }
+  }, [addToast, loadUpcomingReminders]);
+
+  const sendTaskReminderAction = useCallback(async (taskId) => {
+    try {
+      const res = await api.sendTaskReminder(taskId);
+      const nowIso = res?.sent_at || new Date().toISOString();
+      const timeStr = new Date(nowIso).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+
+      dispatch({
+        type: 'MARK_REMINDER_SENT',
+        taskId,
+        timestamp: nowIso,
+      });
+
+      addToast(`Pre-deadline reminder sent to @${res?.owner || 'owner'} at ${timeStr} ✓`, 'success');
+      return res;
+    } catch (err) {
+      addToast(err?.detail || 'Failed to send reminder.', 'error');
+      throw err;
+    }
+  }, [addToast]);
+
   const ingestMeeting = useCallback(async (formData) => {
     dispatch({ type: 'SET_LOADING', key: 'ingest', value: true });
     dispatch({ type: 'SET_ERROR', error: null });
@@ -379,14 +491,14 @@ export function useWorkspace() {
     try {
       const res = await api.loadMeeting1();
       addToast('Sprint Kickoff (Nov 14) pre-seeded successfully!', 'success');
-      await Promise.all([loadStaging(), loadTasks(), loadDecisions(), loadAnalytics()]);
+      await Promise.all([loadStaging(), loadTasks(), loadDecisions(), loadAnalytics(), loadUpcomingReminders()]);
       return res;
     } catch (err) {
       addToast(err?.detail || 'Failed to load Demo 1.', 'error');
     } finally {
       dispatch({ type: 'SET_LOADING', key: 'demo', value: false });
     }
-  }, [addToast, loadStaging, loadTasks, loadDecisions, loadAnalytics]);
+  }, [addToast, loadStaging, loadTasks, loadDecisions, loadAnalytics, loadUpcomingReminders]);
 
   const runDemo2 = useCallback(async () => {
     dispatch({ type: 'SET_LOADING', key: 'demo', value: true });
@@ -396,14 +508,14 @@ export function useWorkspace() {
         dispatch({ type: 'SET_STALE_COMMITMENTS', commitments: res.stale_commitments });
       }
       addToast('Tech Sync (Nov 21) loaded! Cross-meeting conflicts detected ⚡', 'error');
-      await Promise.all([loadStaging(), loadTasks(), loadDecisions(), loadAnalytics()]);
+      await Promise.all([loadStaging(), loadTasks(), loadDecisions(), loadAnalytics(), loadUpcomingReminders()]);
       return res;
     } catch (err) {
       addToast(err?.detail || 'Failed to load Demo 2.', 'error');
     } finally {
       dispatch({ type: 'SET_LOADING', key: 'demo', value: false });
     }
-  }, [addToast, loadStaging, loadTasks, loadDecisions, loadAnalytics]);
+  }, [addToast, loadStaging, loadTasks, loadDecisions, loadAnalytics, loadUpcomingReminders]);
 
   const resetDemo = useCallback(async () => {
     dispatch({ type: 'SET_LOADING', key: 'demo', value: true });
@@ -413,22 +525,22 @@ export function useWorkspace() {
         dispatch({ type: 'SET_STALE_COMMITMENTS', commitments: res.meeting_2.stale_commitments });
       }
       addToast('Database reset with demo scenarios & conflicts', 'info');
-      await Promise.all([loadStaging(), loadTasks(), loadDecisions(), loadAnalytics()]);
+      await Promise.all([loadStaging(), loadTasks(), loadDecisions(), loadAnalytics(), loadUpcomingReminders()]);
     } catch (err) {
       addToast(err?.detail || 'Failed to reset demo.', 'error');
     } finally {
       dispatch({ type: 'SET_LOADING', key: 'demo', value: false });
     }
-  }, [addToast, loadStaging, loadTasks, loadDecisions, loadAnalytics]);
+  }, [addToast, loadStaging, loadTasks, loadDecisions, loadAnalytics, loadUpcomingReminders]);
 
   const switchTab = useCallback((tab) => {
     dispatch({ type: 'SET_TAB', tab });
     if (tab === 'ingest') { loadStaging(); loadAnalytics(); }
-    if (tab === 'board') { loadTasks(); loadAnalytics(); }
+    if (tab === 'board') { loadTasks(); loadAnalytics(); loadUpcomingReminders(); }
     if (tab === 'decisions') loadDecisions();
     if (tab === 'digest') loadDigest();
     if (tab === 'lineage') loadLineageGraph();
-  }, [loadStaging, loadAnalytics, loadTasks, loadDecisions, loadDigest, loadLineageGraph]);
+  }, [loadStaging, loadAnalytics, loadTasks, loadUpcomingReminders, loadDecisions, loadDigest, loadLineageGraph]);
 
   return {
     state,
@@ -440,6 +552,9 @@ export function useWorkspace() {
       loadDigest,
       loadLineageGraph,
       loadAnalytics,
+      loadUpcomingReminders,
+      dispatchAllRemindersAction,
+      sendTaskReminderAction,
       sendNudgeAction,
       ingestMeeting,
       approveItem,

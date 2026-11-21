@@ -24,10 +24,11 @@ export const VeriflowWorkspace = forwardRef(function VeriflowWorkspace(props, re
   const [demo1Loading, setDemo1Loading] = useState(false);
   const [demo2Loading, setDemo2Loading] = useState(false);
 
-  // On mount: load staging queue & analytics to populate pending badge and readiness
+  // On mount: load staging queue, analytics & upcoming deadline reminders
   useEffect(() => {
     actions.loadStaging();
     actions.loadAnalytics();
+    actions.loadUpcomingReminders();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -98,6 +99,8 @@ export const VeriflowWorkspace = forwardRef(function VeriflowWorkspace(props, re
           <div className="ws-tabs">
             {TABS.map((tab) => {
               const isActive = state.activeTab === tab.id;
+              const isIngest = tab.id === 'ingest';
+              const isBoard = tab.id === 'board';
               return (
                 <button
                   key={tab.id}
@@ -106,9 +109,17 @@ export const VeriflowWorkspace = forwardRef(function VeriflowWorkspace(props, re
                   type="button"
                 >
                   {tab.label}
-                  {tab.badge && state.pendingCount > 0 && (
+                  {isIngest && state.pendingCount > 0 && (
                     <span className={`ws-tab-badge ${isActive ? 'active' : ''}`}>
                       {state.pendingCount}
+                    </span>
+                  )}
+                  {isBoard && state.upcomingRemindersCount > 0 && (
+                    <span
+                      className={`ws-tab-badge ws-tab-badge-reminders ${isActive ? 'active' : ''}`}
+                      title={`${state.upcomingRemindersCount} tasks due within 48h`}
+                    >
+                      {state.upcomingRemindersCount}
                     </span>
                   )}
                 </button>
@@ -117,8 +128,23 @@ export const VeriflowWorkspace = forwardRef(function VeriflowWorkspace(props, re
           </div>
         </div>
 
-        {/* Right: demo control bar */}
+        {/* Right: demo control bar & proactive reminders pill */}
         <div className="ws-demo-bar">
+          {state.upcomingRemindersCount > 0 && (
+            <button
+              className="ws-reminder-sub-pill"
+              onClick={() => actions.switchTab('board')}
+              type="button"
+              title="Click to view upcoming pre-deadline reminders on Execution Board"
+            >
+              <span className="ws-pulse-dot" />
+              <span>
+                {state.upcomingReminders.some((r) => !r.reminder_sent)
+                  ? `⚡ ${state.upcomingRemindersCount} Due <48h`
+                  : `✓ Reminders Dispatched (${state.upcomingRemindersCount})`}
+              </span>
+            </button>
+          )}
           <button
             className="ws-demo-btn"
             onClick={handleDemo1}

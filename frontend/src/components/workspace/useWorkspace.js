@@ -515,8 +515,16 @@ export function useWorkspace() {
         dispatch({ type: 'SET_STALE_COMMITMENTS', commitments: res.stale_commitments });
       }
       addToast(`Pipeline executed for "${formData.title}"`, 'success');
-      // Reload staging, tasks, analytics, lineage
-      await Promise.all([loadStaging(), loadTasks(), loadAnalytics()]);
+      // Instant parallel cross-tab synchronization
+      await Promise.all([
+        loadStaging(),
+        loadTasks(),
+        loadDecisions(),
+        loadAnalytics(),
+        loadUpcomingReminders(),
+        loadDigest(true),
+        loadLineageGraph(),
+      ]);
       return res;
     } catch (err) {
       const msg = err?.detail || 'Ingestion pipeline failed.';
@@ -526,7 +534,7 @@ export function useWorkspace() {
     } finally {
       dispatch({ type: 'SET_LOADING', key: 'ingest', value: false });
     }
-  }, [addToast, loadStaging, loadTasks, loadAnalytics]);
+  }, [addToast, loadStaging, loadTasks, loadDecisions, loadAnalytics, loadUpcomingReminders, loadDigest, loadLineageGraph]);
 
   const approveItem = useCallback(async (id) => {
     try {
@@ -540,13 +548,22 @@ export function useWorkspace() {
         toastMsg = `Approved! Dispatched to ${rcpt.channel || 'Webhook'} (Receipt #${rcpt.id || id})`;
       }
       addToast(toastMsg, 'success');
-      await Promise.all([loadTasks(), loadAnalytics()]);
+      // Instant parallel cross-tab synchronization
+      await Promise.all([
+        loadStaging(),
+        loadTasks(),
+        loadDecisions(),
+        loadAnalytics(),
+        loadUpcomingReminders(),
+        loadDigest(true),
+        loadLineageGraph(),
+      ]);
       return res;
     } catch (err) {
       addToast(err?.detail || 'Failed to approve item.', 'error');
       throw err;
     }
-  }, [addToast, loadTasks, loadAnalytics]);
+  }, [addToast, loadStaging, loadTasks, loadDecisions, loadAnalytics, loadUpcomingReminders, loadDigest, loadLineageGraph]);
 
   const rejectItem = useCallback(async (id, reason = 'Rejected by reviewer') => {
     try {
@@ -582,13 +599,22 @@ export function useWorkspace() {
       const res = await api.approveAllReady();
       const count = res?.approved_count ?? 0;
       addToast(`Bulk Approved ${count} ready items!`, 'success');
-      await Promise.all([loadStaging(), loadTasks(), loadAnalytics()]);
+      // Instant parallel cross-tab synchronization
+      await Promise.all([
+        loadStaging(),
+        loadTasks(),
+        loadDecisions(),
+        loadAnalytics(),
+        loadUpcomingReminders(),
+        loadDigest(true),
+        loadLineageGraph(),
+      ]);
       return res;
     } catch (err) {
       addToast(err?.detail || 'Bulk approval failed.', 'error');
       throw err;
     }
-  }, [addToast, loadStaging, loadTasks, loadAnalytics]);
+  }, [addToast, loadStaging, loadTasks, loadDecisions, loadAnalytics, loadUpcomingReminders, loadDigest, loadLineageGraph]);
 
   const moveTask = useCallback(async (id, status) => {
     try {
@@ -597,27 +623,35 @@ export function useWorkspace() {
         dispatch({ type: 'UPDATE_TASK', task: res });
       }
       addToast(`Task moved to ${status.replace('_', ' ')}`, 'info');
-      await loadAnalytics();
+      await Promise.all([loadTasks(), loadAnalytics(), loadDigest(true), loadLineageGraph()]);
       return res;
     } catch (err) {
       addToast(err?.detail || 'Failed to update task status.', 'error');
       throw err;
     }
-  }, [addToast, loadAnalytics]);
+  }, [addToast, loadTasks, loadAnalytics, loadDigest, loadLineageGraph]);
 
   const runDemo1 = useCallback(async () => {
     dispatch({ type: 'SET_LOADING', key: 'demo', value: true });
     try {
       const res = await api.loadMeeting1();
       addToast('Sprint Kickoff (Nov 14) pre-seeded successfully!', 'success');
-      await Promise.all([loadStaging(), loadTasks(), loadDecisions(), loadAnalytics(), loadUpcomingReminders()]);
+      await Promise.all([
+        loadStaging(),
+        loadTasks(),
+        loadDecisions(),
+        loadAnalytics(),
+        loadUpcomingReminders(),
+        loadDigest(true),
+        loadLineageGraph(),
+      ]);
       return res;
     } catch (err) {
       addToast(err?.detail || 'Failed to load Demo 1.', 'error');
     } finally {
       dispatch({ type: 'SET_LOADING', key: 'demo', value: false });
     }
-  }, [addToast, loadStaging, loadTasks, loadDecisions, loadAnalytics, loadUpcomingReminders]);
+  }, [addToast, loadStaging, loadTasks, loadDecisions, loadAnalytics, loadUpcomingReminders, loadDigest, loadLineageGraph]);
 
   const runDemo2 = useCallback(async () => {
     dispatch({ type: 'SET_LOADING', key: 'demo', value: true });
@@ -627,30 +661,46 @@ export function useWorkspace() {
         dispatch({ type: 'SET_STALE_COMMITMENTS', commitments: res.stale_commitments });
       }
       addToast('Tech Sync (Nov 21) loaded! Cross-meeting conflicts detected ⚡', 'error');
-      await Promise.all([loadStaging(), loadTasks(), loadDecisions(), loadAnalytics(), loadUpcomingReminders()]);
+      await Promise.all([
+        loadStaging(),
+        loadTasks(),
+        loadDecisions(),
+        loadAnalytics(),
+        loadUpcomingReminders(),
+        loadDigest(true),
+        loadLineageGraph(),
+      ]);
       return res;
     } catch (err) {
       addToast(err?.detail || 'Failed to load Demo 2.', 'error');
     } finally {
       dispatch({ type: 'SET_LOADING', key: 'demo', value: false });
     }
-  }, [addToast, loadStaging, loadTasks, loadDecisions, loadAnalytics, loadUpcomingReminders]);
+  }, [addToast, loadStaging, loadTasks, loadDecisions, loadAnalytics, loadUpcomingReminders, loadDigest, loadLineageGraph]);
 
   const resetDemo = useCallback(async () => {
     dispatch({ type: 'SET_LOADING', key: 'demo', value: true });
     try {
       const res = await api.resetDemo();
-      if (res?.meeting_2?.stale_commitments) {
-        dispatch({ type: 'SET_STALE_COMMITMENTS', commitments: res.meeting_2.stale_commitments });
-      }
-      addToast('Database reset with demo scenarios & conflicts', 'info');
-      await Promise.all([loadStaging(), loadTasks(), loadDecisions(), loadAnalytics(), loadUpcomingReminders()]);
+      dispatch({ type: 'SET_STALE_COMMITMENTS', commitments: [] });
+      dispatch({ type: 'SET_TRACE', trace: [] });
+      addToast('Workspace completely reset to clean state (0 records)', 'info');
+      await Promise.all([
+        loadStaging(),
+        loadTasks(),
+        loadDecisions(),
+        loadAnalytics(),
+        loadUpcomingReminders(),
+        loadDigest(true),
+        loadLineageGraph(),
+      ]);
+      return res;
     } catch (err) {
-      addToast(err?.detail || 'Failed to reset demo.', 'error');
+      addToast(err?.detail || 'Failed to reset workspace.', 'error');
     } finally {
       dispatch({ type: 'SET_LOADING', key: 'demo', value: false });
     }
-  }, [addToast, loadStaging, loadTasks, loadDecisions, loadAnalytics, loadUpcomingReminders]);
+  }, [addToast, loadStaging, loadTasks, loadDecisions, loadAnalytics, loadUpcomingReminders, loadDigest, loadLineageGraph]);
 
   const switchTab = useCallback((tab) => {
     dispatch({ type: 'SET_TAB', tab });

@@ -35,7 +35,7 @@ export function NudgeModal({
   // Reset and synchronize fields whenever modal is opened
   useEffect(() => {
     if (isOpen) {
-      const defaultRec = (initialRecipient || '').trim() || 'Marcus';
+      const defaultRec = (initialRecipient || '').trim() || '@team';
       const cleanQuote = (taskTitle || commitmentTitle || verbatimQuote || '').trim();
       setRecipient(defaultRec);
       setChannel('slack');
@@ -135,7 +135,7 @@ export function NudgeModal({
               className="ws-form-input"
               value={recipient}
               onChange={handleRecipientChange}
-              placeholder="e.g. Marcus, Sarah, @devops"
+              placeholder="e.g. Souvik, Manas, @team"
             />
           </div>
           <div>

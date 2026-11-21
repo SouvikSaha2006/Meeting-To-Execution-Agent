@@ -141,8 +141,7 @@ async def _self_ping_keepalive():
 async def lifespan(app: FastAPI):
     logger.info("🚀 Meeting-to-Execution Agent starting up...")
     await init_db()
-    logger.info("✅ Database initialised")
-    await seed_if_empty()
+    logger.info("✅ Database initialised (clean real-time workspace)")
     if DEMO_MODE:
         logger.warning("⚠️  DEMO_MODE=true — Gemini API calls will use mock responses")
     
@@ -386,8 +385,11 @@ async def _approve_action_item(
 async def _reset_database(db: AsyncSession) -> None:
     """Hard-delete all data in dependency order. Uses flush so caller's session commits."""
     from sqlalchemy import text
-    for table in ["execution_tasks", "staging_items", "decisions", "meetings"]:
-        await db.execute(text(f"DELETE FROM {table}"))
+    for table in ["reminder_logs", "execution_tasks", "staging_items", "decisions", "meetings"]:
+        try:
+            await db.execute(text(f"DELETE FROM {table}"))
+        except Exception:
+            pass
     await db.flush()
 
 
@@ -597,6 +599,21 @@ async def ingest_meeting(
             "stale_commitments_count": len(stale_commitments),
         },
     )
+
+
+# ── Demo: Reset Workspace to Clean State (0 Records) ─────────────────────────
+@app.post("/api/demo/reset", tags=["Demo"])
+async def demo_reset(db: AsyncSession = Depends(get_db)):
+    """
+    Completely clear all SQLite tables (meetings, decisions, execution_tasks,
+    staging_items, reminder_logs) to 0 records so users can test custom transcripts cleanly.
+    """
+    await _reset_database(db)
+    await db.commit()
+    return {
+        "message": "Workspace completely reset to clean state (0 records)",
+        "tables_cleared": ["meetings", "decisions", "execution_tasks", "staging_items", "reminder_logs"],
+    }
 
 
 # ── Demo: Seed Full Demo ──────────────────────────────────────────────────────
@@ -1000,10 +1017,8 @@ async def weekly_digest(db: AsyncSession = Depends(get_db)):
     """
     Generate a structured per-owner Weekly Execution Digest deterministically (<20ms).
     Returns both structured JSON (owners, by_owner, summary_stats) and Markdown digest.
-    Never fails or hangs; automatically seeds demo records if database is empty.
+    Operates strictly from actual recorded database records.
     """
-    await seed_if_empty()
-
     now = datetime.datetime.now(datetime.timezone.utc)
     week_start = now - datetime.timedelta(days=7)
     today = now.date()
@@ -1028,6 +1043,31 @@ async def weekly_digest(db: AsyncSession = Depends(get_db)):
         .where(Decision.status == "SUPERSEDED")
     )
     conflict_rows = (await db.execute(conflict_stmt)).all()
+
+    # If database is completely empty, return clean neutral empty digest
+    if not all_tasks and not decision_rows and not conflict_rows:
+        empty_text = (
+            "### Weekly Execution Digest\n\n"
+            "*No meeting transcripts or commitments recorded yet. Ingest a transcript above to generate an automated executive summary.*"
+        )
+        return WeeklyDigestResponse(
+            generated_at=now.isoformat(),
+            period=f"{week_start.strftime('%b %d')} – {today.strftime('%b %d, %Y')}",
+            summary_stats={
+                "total_tasks": 0,
+                "in_progress": 0,
+                "completed": 0,
+                "todo": 0,
+                "overdue": 0,
+                "active_decisions": 0,
+                "resolved_conflicts": 0,
+            },
+            owners=[],
+            by_owner=[],
+            resolved_conflicts=[],
+            markdown=empty_text,
+            markdown_digest=empty_text,
+        )
     resolved_conflicts = [
         {
             "topic_key": r[0].topic_key or "Architecture",
@@ -1597,9 +1637,9 @@ async def list_reminder_logs(
 async def ask_memory(req: MemoryAskRequest, db: AsyncSession = Depends(get_db)):
     """
     Query cross-meeting decisions, tasks, and transcripts using natural language.
-    Strictly cites meeting title, meeting date, speaker, and verbatim quote.
+    Strictly cites meeting title, meeting date, speaker, and verbatim quote from SQLite.
+    Never auto-seeds demo data; operates 100% on actual ingested records.
     """
-    await seed_if_empty()
     return await ask_organizational_memory(question=req.question, db=db)
 
 

@@ -60,7 +60,8 @@ export const ingestMeeting = (body) => request('POST', '/api/meetings/ingest', b
 // ---------------------------------------------------------------------------
 export const loadMeeting1   = () => request('POST', '/api/demo/load-meeting-1');
 export const loadMeeting2   = () => request('POST', '/api/demo/load-meeting-2');
-export const resetDemo      = () => request('POST', '/api/demo/seed');
+export const seedDemo       = () => request('POST', '/api/demo/seed');
+export const resetDemo      = () => request('POST', '/api/demo/reset');
 
 // ---------------------------------------------------------------------------
 // Staging queue

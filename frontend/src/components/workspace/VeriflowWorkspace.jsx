@@ -234,7 +234,7 @@ export const VeriflowWorkspace = forwardRef(function VeriflowWorkspace(props, re
       <div id="weekly-digest"  aria-hidden="true" style={{ position: 'relative', top: -100 }} />
 
       {/* Floating Ask Meeting Memory Bar */}
-      <AskMemoryBar />
+      <AskMemoryBar decisions={state.decisions} tasks={state.tasks} staging={state.staging} />
 
       {/* Toast notifications */}
       <ToastContainer

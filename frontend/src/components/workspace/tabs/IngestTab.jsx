@@ -217,22 +217,9 @@ function ConflictCard({ item, actions }) {
   const blastRadius = parseBlastRadius(item) || {
     risk_level: 'HIGH',
     estimated_delay_days: 3,
-    impacted_tasks: [
-      {
-        title: 'Build user dashboard frontend',
-        owner: 'Priya',
-        current_deadline: '2024-11-26',
-        impact_reason: 'Prerequisite API refactor pushes deliverable past scheduled launch.',
-      },
-      {
-        title: 'Set up end-to-end test suite',
-        owner: 'Tom',
-        current_deadline: '2024-11-25',
-        impact_reason: 'Test coverage cannot run until database models stabilize.',
-      },
-    ],
+    impacted_tasks: [],
     mitigation_suggestion:
-      'Freeze secondary scope and apply mocked JSON contracts so downstream teams can proceed without waiting on schema refactoring.',
+      'Align affected task owners and apply mocked contracts so downstream teams can proceed without waiting on schema refactoring.',
   };
 
   const title = item.item_type === 'DECISION' ? payload.statement : payload.title;
@@ -427,7 +414,7 @@ function ClarifyCard({ item, actions, onOpenNudge }) {
       <div className="ws-inline-form">
         <input
           className="ws-form-input"
-          placeholder="Owner (e.g. David)"
+          placeholder="Owner (e.g. Souvik, Manas)"
           value={owner}
           onChange={(e) => setOwner(e.target.value)}
         />
@@ -461,7 +448,7 @@ function ClarifyCard({ item, actions, onOpenNudge }) {
             onOpenNudge({
               targetType: 'STAGING_ITEM',
               targetId: item.id,
-              recipient: owner || payload.owner || 'DevOps Team',
+              recipient: owner || payload.owner || '@team',
               taskTitle: cleanTitle,
               verbatimQuote: item.verbatim_quote || '',
               commitmentTitle: cleanTitle,

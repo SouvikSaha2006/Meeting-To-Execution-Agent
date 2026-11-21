@@ -1,13 +1,7 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useMemo } from 'react';
 import { askMemory } from '../../api/client.js';
 
-const STARTER_CHIPS = [
-  'Why did our DB choice change?',
-  'Who has tasks due soon?',
-  'What decisions were superseded?',
-];
-
-export function AskMemoryBar() {
+export function AskMemoryBar({ decisions = [], tasks = [], staging = [] }) {
   const [question, setQuestion] = useState('');
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
@@ -15,6 +9,45 @@ export function AskMemoryBar() {
   const [isOpen, setIsOpen] = useState(false);
   const [expandedCitationIdx, setExpandedCitationIdx] = useState(null);
   const inputRef = useRef(null);
+
+  // Dynamically compute context-aware starter question chips
+  const starterChips = useMemo(() => {
+    const chips = [];
+
+    // 1. Check for superseded decisions or conflicts
+    const superseded = (decisions || []).filter((d) => d.status === 'SUPERSEDED' || d.superseded_by_id);
+    const conflicts = (staging || []).filter((s) => s.state === 'CONFLICT_DETECTED');
+
+    if (superseded.length > 0 || conflicts.length > 0) {
+      const topic = superseded[0]?.topic_key || 'DB';
+      const cleanTopic = topic.replace(/_/g, ' ');
+      chips.push(`Why did our ${cleanTopic} choice change?`);
+      chips.push('What decisions were superseded?');
+    }
+
+    // 2. Check for tasks & owners
+    if (tasks && tasks.length > 0) {
+      chips.push('Who has tasks due soon?');
+      const uniqueOwners = Array.from(new Set(tasks.map((t) => t.owner).filter(Boolean)));
+      if (uniqueOwners.length > 0) {
+        chips.push(`What are ${uniqueOwners[0]}'s tasks?`);
+      }
+    }
+
+    // 3. Fallbacks if chips < 3
+    const defaults = [
+      'Why did our DB choice change?',
+      'Who has tasks due soon?',
+      'What decisions were superseded?',
+    ];
+    for (const def of defaults) {
+      if (chips.length < 3 && !chips.includes(def)) {
+        chips.push(def);
+      }
+    }
+
+    return chips.slice(0, 3);
+  }, [decisions, tasks, staging]);
 
   async function handleAsk(q) {
     const queryText = (q ?? question).trim();
@@ -117,8 +150,12 @@ export function AskMemoryBar() {
                               <span className="ws-cite-meeting">{cite.meeting_title}</span>
                               <span className="ws-cite-dot">•</span>
                               <span className="ws-cite-date">{cite.meeting_date}</span>
-                              <span className="ws-cite-dot">•</span>
-                              <span className="ws-cite-speaker">{cite.speaker}</span>
+                              {cite.speaker && cite.speaker !== 'Unassigned' && (
+                                <>
+                                  <span className="ws-cite-dot">•</span>
+                                  <span className="ws-cite-speaker">{cite.speaker}</span>
+                                </>
+                              )}
                             </div>
 
                             {/* Clickable quote snippet / expanded */}
@@ -156,7 +193,7 @@ export function AskMemoryBar() {
         {/* Starters Row */}
         <div className="ws-memory-starters-row">
           <span className="ws-memory-starters-label">Ask Memory:</span>
-          {STARTER_CHIPS.map((chip, idx) => (
+          {starterChips.map((chip, idx) => (
             <button
               key={idx}
               type="button"

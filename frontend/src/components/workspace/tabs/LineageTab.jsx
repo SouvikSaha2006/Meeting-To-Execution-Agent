@@ -309,7 +309,12 @@ export function LineageTab({ state, actions }) {
           </svg>
 
           {/* Node Cards */}
-          {visibleNodes.map((node) => {
+          {visibleNodes.length === 0 ? (
+            <div style={{ position: 'absolute', top: 120, left: 100, color: 'rgba(13,13,12,0.5)', fontSize: 13 }}>
+              No commitments yet — ingest a meeting transcript to populate owners and lineage graph.
+            </div>
+          ) : (
+            visibleNodes.map((node) => {
             const theme = getNodeTheme(node);
             const isSelected = selectedNodeId === node.id;
 
@@ -366,7 +371,7 @@ export function LineageTab({ state, actions }) {
                 )}
               </div>
             );
-          })}
+          }))}
         </div>
       </div>
 

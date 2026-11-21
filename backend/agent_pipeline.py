@@ -883,7 +883,7 @@ def _soft_match(a: str, b: str, threshold: float = 0.6) -> bool:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# USP 1: Counterfactual Blast-Radius Analyzer
+# USP 1: Counterfactual Blast-Radius Analyzer (100% Database-Driven)
 # ═══════════════════════════════════════════════════════════════════════════════
 async def analyze_blast_radius(
     item_payload: dict,
@@ -893,109 +893,148 @@ async def analyze_blast_radius(
     current_meeting_id: Optional[int] = None,
 ) -> Optional[BlastRadiusReport]:
     """
-    Simulates the ripple impact of a conflict or architectural/deadline shift
-    against active execution_tasks and active decisions.
+    Simulates the downstream ripple impact of a conflict or architectural/deadline shift
+    against active execution_tasks and active staging items in the database.
+    Operates 100% from actual SQLite records — never fabricates mock tasks or names.
     """
+    text = (item_payload.get("statement") or item_payload.get("title") or "").lower()
+    topic = (item_payload.get("topic_key") or "").lower()
+
     if not conflict and item_payload.get("status") != "NEEDS_CLARIFICATION":
         # Check if topic or text implies an architectural or timeline pivot
-        text = (item_payload.get("statement") or item_payload.get("title") or "").lower()
-        if not any(k in text for k in ["switch", "migrate", "launch", "database", "delay", "moved up"]):
+        if not any(k in text for k in ["switch", "migrate", "launch", "database", "delay", "moved up", "change", "pivot"]):
             return None
 
-    # Load active tasks from DB
-    stmt = select(ExecutionTask).where(ExecutionTask.status.in_(["TODO", "IN_PROGRESS"]))
-    tasks: list[ExecutionTask] = (await db.execute(stmt)).scalars().all()
+    # 1. Load real active tasks from SQLite
+    task_stmt = select(ExecutionTask).where(ExecutionTask.status.in_(["TODO", "IN_PROGRESS"]))
+    if current_meeting_id:
+        task_stmt = task_stmt.where(ExecutionTask.meeting_id != current_meeting_id)
+    tasks: list[ExecutionTask] = (await db.execute(task_stmt)).scalars().all()
 
-    text = (item_payload.get("statement") or item_payload.get("title") or "").lower()
-    topic = item_payload.get("topic_key", "").lower()
+    # 2. Also load pending staging items from earlier meetings
+    staging_stmt = select(StagingItem).where(
+        StagingItem.state.in_(["READY_TO_APPROVE", "NEEDS_CLARIFICATION", "CONFLICT_DETECTED"])
+    )
+    if current_meeting_id:
+        staging_stmt = staging_stmt.where(StagingItem.meeting_id != current_meeting_id)
+    staged_items: list[StagingItem] = (await db.execute(staging_stmt)).scalars().all()
+
     impacted: list[BlastRadiusTaskImpact] = []
 
+    # Dynamic target date extraction
+    new_target = item_payload.get("deadline_iso")
+    if not new_target:
+        date_iso_match = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", text)
+        if date_iso_match:
+            new_target = date_iso_match.group(1)
+
     # Case A: Launch date acceleration / compression
-    if "launch" in topic or "launch" in text or ("moved up" in text and "22" in text):
-        new_target = "2024-11-22"
+    if "launch" in topic or "launch" in text or "release" in text or ("moved up" in text and new_target):
+        target_label = new_target or "the accelerated target date"
         for t in tasks:
-            if t.deadline_iso and t.deadline_iso > new_target:
+            if new_target and t.deadline_iso and t.deadline_iso > new_target:
                 impacted.append(
                     BlastRadiusTaskImpact(
                         task_id=t.id,
                         title=t.title,
-                        owner=t.owner,
+                        owner=t.owner or "Assignee",
                         current_deadline=t.deadline_iso,
-                        impact_reason=f"Scheduled deadline ({t.deadline_iso}) falls AFTER the new launch target ({new_target}); task will miss release window.",
+                        impact_reason=f"Scheduled deadline ({t.deadline_iso}) falls AFTER target launch ({new_target}); task will miss release window.",
                     )
                 )
-            elif t.deadline_iso == new_target:
+            elif new_target and t.deadline_iso == new_target:
                 impacted.append(
                     BlastRadiusTaskImpact(
                         task_id=t.id,
                         title=t.title,
-                        owner=t.owner,
+                        owner=t.owner or "Assignee",
                         current_deadline=t.deadline_iso,
                         impact_reason=f"Delivers on the exact day of launch ({new_target}); leaves zero QA testing or integration buffer.",
                     )
                 )
 
         if not impacted and tasks:
-            for t in tasks[:2]:
+            for t in tasks[:3]:
                 impacted.append(
                     BlastRadiusTaskImpact(
                         task_id=t.id,
                         title=t.title,
-                        owner=t.owner,
+                        owner=t.owner or "Assignee",
                         current_deadline=t.deadline_iso,
-                        impact_reason="Delivery timeline compressed by 7 days; requires immediate triage.",
+                        impact_reason=f"Timeline compression requires deliverable to be triaged against {target_label}.",
                     )
                 )
 
-        owners = list(dict.fromkeys(t.owner for t in impacted if t.owner))
+        owners = list(dict.fromkeys(t.owner for t in impacted if t.owner and t.owner != "Assignee"))
         owners_mention = f"with {', '.join(f'@{o}' for o in owners)}" if owners else "with task owners"
         return BlastRadiusReport(
             risk_level="CRITICAL",
             impacted_tasks=impacted,
-            estimated_delay_days=7,
+            estimated_delay_days=5,
             mitigation_suggestion=f"Align {owners_mention} to cut secondary scope, enforce a feature freeze, and accelerate testing to absorb launch acceleration.",
         )
 
-    # Case B: Database architecture pivot (PostgreSQL -> MongoDB)
-    if "database" in topic or "database" in text or "mongodb" in text or "postgres" in text:
+    # Case B: Architectural / Database pivot
+    tech_keywords = ["database", "db", "postgres", "mongodb", "mysql", "nosql", "schema", "api", "migration", "backend", "cache", "redis"]
+    if any(k in topic for k in tech_keywords) or any(k in text for k in tech_keywords):
         for t in tasks:
             t_title = t.title.lower()
-            if any(k in t_title for k in ["schema", "database", "api", "dashboard", "migration"]):
+            if any(k in t_title for k in ["schema", "database", "api", "dashboard", "migration", "model", "query", "backend", "service"]):
                 reason = (
-                    "Relational schema must be refactored into MongoDB document collections."
-                    if "schema" in t_title
-                    else "API queries must be rewritten from SQL relational joins to MongoDB aggregation pipelines."
+                    "Schema definitions must be refactored to align with the new architectural decision."
+                    if any(k in t_title for k in ["schema", "migration", "model"])
+                    else "API query layer and endpoints must be updated to support the new database contracts."
                     if "api" in t_title
-                    else "Downstream deliverable delayed by 3-4 days due to prerequisite API refactor."
+                    else "Downstream deliverable requires integration testing against updated data models."
                 )
                 impacted.append(
                     BlastRadiusTaskImpact(
                         task_id=t.id,
                         title=t.title,
-                        owner=t.owner,
+                        owner=t.owner or "Assignee",
                         current_deadline=t.deadline_iso,
                         impact_reason=reason,
                     )
                 )
+
+        # Inspect staged items from previous meetings if tasks is empty
+        if not impacted:
+            for s in staged_items:
+                s_payload = {}
+                try:
+                    s_payload = json.loads(s.payload_json)
+                except Exception:
+                    pass
+                s_title = (s_payload.get("title") or "").lower()
+                if any(k in s_title for k in ["schema", "database", "api", "migration", "service"]):
+                    impacted.append(
+                        BlastRadiusTaskImpact(
+                            task_id=None,
+                            title=s_payload.get("title", "Staged Item"),
+                            owner=s_payload.get("owner") or "Assignee",
+                            current_deadline=s_payload.get("deadline_iso"),
+                            impact_reason="Staged prerequisite commitment is directly impacted by the architectural pivot.",
+                        )
+                    )
 
         if not impacted and tasks:
             impacted.append(
                 BlastRadiusTaskImpact(
                     task_id=tasks[0].id,
                     title=tasks[0].title,
-                    owner=tasks[0].owner,
+                    owner=tasks[0].owner or "Assignee",
                     current_deadline=tasks[0].deadline_iso,
-                    impact_reason="Prerequisite architectural contract changed from SQL to NoSQL.",
+                    impact_reason=f"Prerequisite architectural contract changed regarding '{topic or 'architecture'}'.",
                 )
             )
 
-        owners = list(dict.fromkeys(t.owner for t in impacted if t.owner))
+        owners = list(dict.fromkeys(t.owner for t in impacted if t.owner and t.owner != "Assignee"))
         owners_mention = f"with {', '.join(f'@{o}' for o in owners)}" if owners else "with backend owners"
         return BlastRadiusReport(
             risk_level="HIGH",
             impacted_tasks=impacted,
-            estimated_delay_days=4,
-            mitigation_suggestion=f"Align {owners_mention} on schema and API migration contracts, or extend sprint capacity by 4 days to absorb refactoring.",
+            estimated_delay_days=3,
+            mitigation_suggestion=f"Align {owners_mention} on schema and API migration contracts, or extend sprint capacity by 3 days to absorb refactoring.",
         )
 
     # Case C: Blocker dependency risk
@@ -1016,7 +1055,7 @@ async def analyze_blast_radius(
             risk_level="MEDIUM",
             impacted_tasks=impacted,
             estimated_delay_days=2,
-            mitigation_suggestion=f"Decouple '{title}' using mocked JSON data contracts so {owner} can develop static components without waiting on the prerequisite.",
+            mitigation_suggestion=f"Decouple '{title}' using mocked JSON data contracts so @{owner} can develop without waiting on the prerequisite.",
         )
 
     # Case D: General conflict
@@ -1026,9 +1065,9 @@ async def analyze_blast_radius(
                 BlastRadiusTaskImpact(
                     task_id=t.id,
                     title=t.title,
-                    owner=t.owner,
+                    owner=t.owner or "Assignee",
                     current_deadline=t.deadline_iso,
-                    impact_reason="Potentially impacted by contradictory decision regarding " + (item_payload.get("topic_key") or "architecture"),
+                    impact_reason=f"Potentially impacted by contradictory decision regarding '{item_payload.get('topic_key') or 'architecture'}'.",
                 )
             )
         topic_name = item_payload.get('topic_key') or 'architecture'
@@ -1637,6 +1676,41 @@ async def run_pipeline(
     return meeting, staged_items, trace.steps
 
 
+def extract_citation_speaker(
+    explicit_speaker: Optional[str] = None,
+    quote: Optional[str] = None,
+    payload: Optional[dict] = None,
+) -> str:
+    """
+    Extracts clean speaker name from explicit fields, quote, or payload.
+    Never returns 'Unassigned' when a speaker can be inferred.
+    """
+    if explicit_speaker and explicit_speaker.strip():
+        norm = normalize_speaker_name(explicit_speaker)
+        if norm.lower() not in ("unassigned", "unknown", "none"):
+            return norm
+
+    if payload:
+        for k in ["decided_by", "owner", "proposed_by", "assignee", "speaker"]:
+            val = payload.get(k)
+            if val and str(val).strip():
+                norm = normalize_speaker_name(str(val))
+                if norm.lower() not in ("unassigned", "unknown", "none"):
+                    return norm
+
+    if quote:
+        matched = match_speaker_line(quote)
+        if matched and matched[0] and matched[0].lower() not in ("narrator", "unknown", "unassigned"):
+            return matched[0]
+        m = re.match(r"^\s*\[?([A-Za-z][A-Za-z0-9_\s\-'\.]{0,35})\]?\s*:\s*", quote)
+        if m:
+            clean = normalize_speaker_name(m.group(1))
+            if clean and clean.lower() not in ("narrator", "unknown", "unassigned"):
+                return clean
+
+    return "Team"
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Natural Language Memory Query Engine (POST /api/memory/ask)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1646,8 +1720,8 @@ async def ask_organizational_memory(
 ) -> MemoryAskResponse:
     """
     Answers natural language questions about cross-meeting memory,
-    strictly citing exact sources (meeting_title, meeting_date, speaker, quote).
-    Never returns 'Not found in recorded meeting memory' when meetings exist in the database.
+    strictly citing exact sources (meeting_title, meeting_date, speaker, quote)
+    from live database records. Never fabricates canned names or mock responses.
     """
     from backend.models import Decision, ExecutionTask, Meeting, StagingItem
 
@@ -1660,6 +1734,14 @@ async def ask_organizational_memory(
     staging_stmt = select(StagingItem, Meeting).join(Meeting, StagingItem.meeting_id == Meeting.id).order_by(StagingItem.id.asc())
     staging_rows = (await db.execute(staging_stmt)).all()
 
+    # Zero meetings empty state guardrail
+    if len(meetings) == 0:
+        return MemoryAskResponse(
+            answer="No meetings have been ingested yet. Paste or upload a transcript above to build your organizational memory.",
+            citations=[],
+            related_task_ids=[],
+        )
+
     active_demo = os.getenv("DEMO_MODE", "false").lower() in ("true", "1", "yes")
     active_key = os.getenv("GEMINI_API_KEY", "") or GEMINI_API_KEY
     active_model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
@@ -1670,7 +1752,7 @@ async def ask_organizational_memory(
             import google.genai as genai
             from google.genai import types as genai_types
 
-            # Build comprehensive multi-table context
+            # Build comprehensive multi-table context from actual database rows
             ctx_lines = ["=== MEETINGS ==="]
             for m in meetings:
                 ctx_lines.append(f"Meeting #{m.id}: '{m.title}' ({m.meeting_date})")
@@ -1678,16 +1760,18 @@ async def ask_organizational_memory(
             ctx_lines.append("\n=== DECISIONS (ACTIVE & SUPERSEDED) ===")
             for d, m in dec_rows:
                 sup = f" [SUPERSEDED by Decision #{d.superseded_by_id}]" if d.superseded_by_id else f" [{d.status}]"
+                decided = extract_citation_speaker(d.decided_by, d.verbatim_quote)
                 ctx_lines.append(
-                    f"- Decision #{d.id}{sup}: Topic='{d.topic_key}', Decided By='{d.decided_by or 'Unknown'}', Meeting='{m.title}' ({m.meeting_date})\n"
+                    f"- Decision #{d.id}{sup}: Topic='{d.topic_key}', Decided By='{decided}', Meeting='{m.title}' ({m.meeting_date})\n"
                     f"  Statement: {d.statement}\n"
                     f"  Verbatim Quote: \"{d.verbatim_quote}\""
                 )
 
             ctx_lines.append("\n=== EXECUTION TASKS ===")
             for t, m in task_rows:
+                owner = extract_citation_speaker(t.owner)
                 ctx_lines.append(
-                    f"- Task #{t.id} [{t.status} | Priority: {t.priority}]: '{t.title}', Owner='{t.owner or 'Unassigned'}', Deadline='{t.deadline_iso or 'None'}', Meeting='{m.title}' ({m.meeting_date})"
+                    f"- Task #{t.id} [{t.status} | Priority: {t.priority}]: '{t.title}', Owner='{owner}', Deadline='{t.deadline_iso or 'None'}', Meeting='{m.title}' ({m.meeting_date})"
                 )
 
             ctx_lines.append("\n=== PENDING STAGING ITEMS (CONFLICTS & CLARIFICATIONS) ===")
@@ -1698,10 +1782,10 @@ async def ask_organizational_memory(
                 except Exception:
                     pass
                 title_or_stmt = payload.get("title") or payload.get("statement") or s.item_type
-                owner = payload.get("owner") or "Unassigned"
+                owner = extract_citation_speaker(payload.get("owner") or payload.get("decided_by"), s.verbatim_quote, payload)
                 deadline = payload.get("deadline_iso") or payload.get("deadline_raw") or "None"
                 ctx_lines.append(
-                    f"- Staged Item #{s.id} [{s.state} | {s.item_type}]: '{title_or_stmt}', Owner='{owner}', Deadline='{deadline}', Meeting='{m.title}' ({m.meeting_date})\n"
+                    f"- Staged Item #{s.id} [{s.state} | {s.item_type}]: '{title_or_stmt}', Owner/Speaker='{owner}', Deadline='{deadline}', Meeting='{m.title}' ({m.meeting_date})\n"
                     f"  Verbatim Quote: \"{s.verbatim_quote or ''}\""
                 )
 
@@ -1734,15 +1818,14 @@ async def ask_organizational_memory(
 
             sys_prompt = (
                 "You are the executive Organizational Memory Copilot for VeriFlow.\n"
-                "You have full visibility into all organizational records: meetings, active and superseded decisions, execution tasks, and staged items.\n\n"
+                "You have full visibility into all organizational records currently stored in the database: meetings, active and superseded decisions, execution tasks, and staged items.\n\n"
                 "CORE INSTRUCTIONS:\n"
-                "1. Answer the user's question accurately, directly, and comprehensively using the provided organizational context.\n"
-                "2. For questions about tasks due soon, deadlines, owners, or workload, summarize non-DONE tasks and pending action items with their owners and deadlines.\n"
-                "3. For questions about database choices, tech stack changes, or conflicts, explain the shift from PostgreSQL to MongoDB or any overrides, citing both past and new quotes.\n"
-                "4. For questions about superseded decisions or conflicts, explicitly list the superseded decisions or conflicts alongside their replacements.\n"
-                "5. Ground every factual assertion with exact citations in the citations array: meeting_title, meeting_date, speaker, and quote.\n"
-                "6. Populate related_task_ids with relevant task IDs.\n"
-                "7. DO NOT say 'Not found in recorded meeting memory' when meetings, decisions, or tasks exist in context."
+                "1. Answer the user's question accurately, directly, and comprehensively using ONLY the provided organizational context.\n"
+                "2. Ground every factual assertion with exact citations in the citations array: meeting_title, meeting_date, speaker, and quote.\n"
+                "3. Use the exact real speaker names from the context (e.g. Souvik, Manas, or whoever is in the records). NEVER invent or assume people not in the context.\n"
+                "4. For questions about database choices, tech stack changes, or superseded decisions, explicitly explain the complete transition: state what was originally decided and by whom (citing the original meeting, speaker, and quote), and what changed or was proposed later and by whom (citing the subsequent meeting, speaker, and quote).\n"
+                "5. For questions about tasks due soon, deadlines, owners, or workload, summarize non-DONE tasks and pending action items with their real owners and deadlines.\n"
+                "6. Populate related_task_ids with relevant task IDs from the context."
             )
 
             user_prompt = f"ORGANIZATIONAL CONTEXT:\n{full_context}\n\nQUESTION: {question}"
@@ -1769,274 +1852,314 @@ async def ask_organizational_memory(
             response = await asyncio.wait_for(asyncio.to_thread(_call_gemini_memory), timeout=8.0)
             data = json.loads(response.text)
             ans = data.get("answer", "")
-            # If model returned empty or fallback string despite context existing, fall back to deterministic
             if ans and ans != "Not found in recorded meeting memory":
+                clean_citations = [
+                    MemoryCitation(
+                        meeting_title=c.get("meeting_title", "Meeting"),
+                        meeting_date=c.get("meeting_date", ""),
+                        speaker=extract_citation_speaker(c.get("speaker"), c.get("quote")),
+                        quote=c.get("quote", ""),
+                    )
+                    for c in data.get("citations", [])
+                ]
                 return MemoryAskResponse(
                     answer=ans,
-                    citations=[MemoryCitation(**c) for c in data.get("citations", [])],
+                    citations=clean_citations,
                     related_task_ids=data.get("related_task_ids", []),
                 )
         except Exception as exc:
-            logger.warning("Gemini API call failed for memory ask, falling back to deterministic: %s", exc)
+            logger.warning("Gemini API call failed for memory ask, falling back to dynamic deterministic synthesis: %s", exc)
 
     # ═══════════════════════════════════════════════════════════════════════════
-    # Deterministic Smart Fallback Matcher (Grounds answers on actual DB records)
+    # Dynamic Deterministic Synthesis Engine (Directly from SQLite objects)
     # ═══════════════════════════════════════════════════════════════════════════
     q_lower = question.lower()
 
-    # 1. Database choice / tech stack query ("Why did our DB choice change?", etc.)
-    if any(k in q_lower for k in ["database", "db", "postgres", "mongodb", "mongo", "nosql", "change", "why did our db", "why did db", "choice", "switch"]):
-        related = [t.id for t, _ in task_rows if any(w in t.title.lower() for w in ["database", "schema", "mongodb", "postgres"])]
+    # Identify all distinct human participants across meetings, decisions, and tasks
+    participants: set[str] = set()
+    for d, _ in dec_rows:
+        if d.decided_by:
+            spk = extract_citation_speaker(d.decided_by)
+            if spk != "Team":
+                participants.add(spk)
+    for t, _ in task_rows:
+        if t.owner:
+            spk = extract_citation_speaker(t.owner)
+            if spk != "Team":
+                participants.add(spk)
+    for s, _ in staging_rows:
+        try:
+            sp = json.loads(s.payload_json)
+            for k in ["owner", "decided_by", "proposed_by"]:
+                if sp.get(k):
+                    spk = extract_citation_speaker(sp[k])
+                    if spk != "Team":
+                        participants.add(spk)
+        except Exception:
+            pass
+
+    # Category 1: Conflict / Superseded / Change / Pivot
+    is_conflict_query = any(k in q_lower for k in [
+        "change", "switch", "why did", "why", "superseded", "supersede", "conflict",
+        "override", "contradict", "reversal", "pivot", "decision", "db", "database", "postgres", "mongodb"
+    ])
+    if is_conflict_query:
+        superseded = [(d, m) for d, m in dec_rows if d.status == "SUPERSEDED" or d.superseded_by_id]
+        conflict_staged = [(s, m) for s, m in staging_rows if s.state == "CONFLICT_DETECTED"]
+        active_decs = [(d, m) for d, m in dec_rows if d.status == "ACTIVE"]
+
+        citations: list[MemoryCitation] = []
+        lines: list[str] = []
+
+        if superseded or conflict_staged:
+            lines.append("Decisions changed or superseded across recorded meetings:")
+            for old_d, old_m in superseded:
+                old_spk = extract_citation_speaker(old_d.decided_by, old_d.verbatim_quote)
+                # Find matching newer decision
+                new_match = next(((d, m) for d, m in dec_rows if d.id == old_d.superseded_by_id), None)
+                if new_match:
+                    new_d, new_m = new_match
+                    new_spk = extract_citation_speaker(new_d.decided_by, new_d.verbatim_quote)
+                    lines.append(
+                        f"• Originally, in '{old_m.title}' ({old_m.meeting_date}), {old_spk} decided: '{old_d.statement}'. "
+                        f"Later, in '{new_m.title}' ({new_m.meeting_date}), {new_spk} updated this to: '{new_d.statement}'."
+                    )
+                    citations.append(MemoryCitation(
+                        meeting_title=old_m.title,
+                        meeting_date=old_m.meeting_date,
+                        speaker=old_spk,
+                        quote=old_d.verbatim_quote or old_d.statement,
+                    ))
+                    citations.append(MemoryCitation(
+                        meeting_title=new_m.title,
+                        meeting_date=new_m.meeting_date,
+                        speaker=new_spk,
+                        quote=new_d.verbatim_quote or new_d.statement,
+                    ))
+                else:
+                    lines.append(
+                        f"• In '{old_m.title}' ({old_m.meeting_date}), {old_spk} decided: '{old_d.statement}' (now SUPERSEDED)."
+                    )
+                    citations.append(MemoryCitation(
+                        meeting_title=old_m.title,
+                        meeting_date=old_m.meeting_date,
+                        speaker=old_spk,
+                        quote=old_d.verbatim_quote or old_d.statement,
+                    ))
+
+            for s, sm in conflict_staged:
+                s_payload = {}
+                try:
+                    s_payload = json.loads(s.payload_json)
+                except Exception:
+                    pass
+                cm = {}
+                try:
+                    cm = json.loads(s.conflict_meta_json or "{}")
+                except Exception:
+                    pass
+                s_spk = extract_citation_speaker(s_payload.get("decided_by") or s_payload.get("owner"), s.verbatim_quote, s_payload)
+                s_stmt = s_payload.get("statement") or s_payload.get("title") or "Contested proposal"
+
+                conf_id = cm.get("conflicting_decision_id")
+                old_match = next(((d, m) for d, m in dec_rows if d.id == conf_id), None)
+                if old_match:
+                    old_d, old_m = old_match
+                    old_spk = extract_citation_speaker(old_d.decided_by, old_d.verbatim_quote)
+                    lines.append(
+                        f"• In '{sm.title}' ({sm.meeting_date}), {s_spk} proposed: '{s_stmt}', "
+                        f"which conflicts with an ACTIVE decision in '{old_m.title}' ({old_m.meeting_date}) by {old_spk} ('{old_d.statement}'). "
+                        f"This conflict is currently pending review in the Human-in-the-Loop queue."
+                    )
+                    citations.append(MemoryCitation(
+                        meeting_title=old_m.title,
+                        meeting_date=old_m.meeting_date,
+                        speaker=old_spk,
+                        quote=old_d.verbatim_quote or old_d.statement,
+                    ))
+                else:
+                    lines.append(
+                        f"• In '{sm.title}' ({sm.meeting_date}), {s_spk} proposed: '{s_stmt}', which flagged a cross-meeting conflict currently pending review in the Human-in-the-Loop queue."
+                    )
+                citations.append(MemoryCitation(
+                    meeting_title=sm.title,
+                    meeting_date=sm.meeting_date,
+                    speaker=s_spk,
+                    quote=s.verbatim_quote or s_stmt,
+                ))
+        elif active_decs:
+            lines.append("Active decisions currently in force across recorded meetings:")
+            for d, m in active_decs:
+                spk = extract_citation_speaker(d.decided_by, d.verbatim_quote)
+                lines.append(f"• In '{m.title}' ({m.meeting_date}), {spk} decided: '{d.statement}'.")
+                citations.append(MemoryCitation(
+                    meeting_title=m.title,
+                    meeting_date=m.meeting_date,
+                    speaker=spk,
+                    quote=d.verbatim_quote or d.statement,
+                ))
+        else:
+            lines.append("No conflicting or superseded decisions recorded in organizational memory yet.")
+
+        related_ids = [t.id for t, _ in task_rows if any(k in t.title.lower() for k in ["database", "schema", "api", "migration", "launch", "architecture"])]
+        if not related_ids and task_rows:
+            related_ids = [t.id for t, _ in task_rows[:3]]
+
         return MemoryAskResponse(
-            answer=(
-                "In 'Sprint 14 Kickoff' (2024-11-14), David (CTO) originally decided to use PostgreSQL as the primary database for ACID compliance in the billing module and existing team expertise. "
-                "However, in 'Architecture & Scope Sync' (2024-11-21), David reversed this decision and switched to MongoDB to better accommodate document-oriented analytics data. "
-                "This triggered a High Blast-Radius warning (+3 days estimated delay) because downstream deliverables (Marcus's schema migration and Priya's dashboard) depend on stabilized database models."
-            ),
-            citations=[
-                MemoryCitation(
-                    meeting_title="Sprint 14 Kickoff - Nov 14",
-                    meeting_date="2024-11-14",
-                    speaker="David (CTO)",
-                    quote="I'm confident we should go with PostgreSQL as our primary database. It gives us the ACID compliance we need for the billing module, and the team has existing expertise. I'm making this call today.",
-                ),
-                MemoryCitation(
-                    meeting_title="Architecture & Scope Sync - Nov 21",
-                    meeting_date="2024-11-21",
-                    speaker="David (CTO)",
-                    quote="I've been doing more research this week and I think we need to switch our database from PostgreSQL to MongoDB. I'm making the call: we're switching to MongoDB.",
-                ),
-            ],
-            related_task_ids=related,
+            answer="\n".join(lines),
+            citations=citations[:4],
+            related_task_ids=related_ids,
         )
 
-    # 2. Tasks / Due Soon / Overdue / Workload query ("Who has tasks due soon?", etc.)
-    if any(k in q_lower for k in ["due soon", "tasks due", "due", "soon", "task", "overdue", "who has", "who is", "workload", "deadline", "assigned"]):
+    # Category 2: Person-Specific Queries
+    matched_person = next((p for p in participants if p.lower() in q_lower), None)
+    if matched_person:
+        p_tasks = [t for t, _ in task_rows if t.owner and matched_person.lower() in t.owner.lower()]
+        p_decs = [(d, m) for d, m in dec_rows if d.decided_by and matched_person.lower() in d.decided_by.lower()]
+        p_staged = []
+        for s, sm in staging_rows:
+            try:
+                sp = json.loads(s.payload_json)
+                if any(matched_person.lower() in str(sp.get(k, '')).lower() for k in ["owner", "decided_by", "proposed_by"]):
+                    p_staged.append((s, sm, sp))
+            except Exception:
+                pass
+
+        lines = [f"Commitments and decisions attributed to {matched_person}:"]
+        citations = []
+        if p_decs:
+            for d, m in p_decs:
+                lines.append(f"• Decision in '{m.title}' ({m.meeting_date}): '{d.statement}' [{d.status}].")
+                citations.append(MemoryCitation(
+                    meeting_title=m.title,
+                    meeting_date=m.meeting_date,
+                    speaker=matched_person,
+                    quote=d.verbatim_quote or d.statement,
+                ))
+        if p_tasks:
+            for t in p_tasks:
+                dl = f"due {t.deadline_iso}" if t.deadline_iso else "no deadline"
+                lines.append(f"• Execution Task: '{t.title}' ({dl}, status: {t.status}).")
+        if p_staged:
+            for s, sm, sp in p_staged:
+                stitle = sp.get("title") or sp.get("statement") or "Staged Item"
+                lines.append(f"• Pending Staging Item: '{stitle}' ({s.state}).")
+                if s.verbatim_quote:
+                    citations.append(MemoryCitation(
+                        meeting_title=sm.title,
+                        meeting_date=sm.meeting_date,
+                        speaker=matched_person,
+                        quote=s.verbatim_quote,
+                    ))
+
+        if not p_decs and not p_tasks and not p_staged:
+            lines.append(f"No specific open tasks or decisions currently recorded for {matched_person}.")
+
+        return MemoryAskResponse(
+            answer="\n".join(lines),
+            citations=citations[:4],
+            related_task_ids=[t.id for t in p_tasks],
+        )
+
+    # Category 3: Tasks / Due Soon / Overdue / Workload / Deadlines
+    is_task_query = any(k in q_lower for k in ["task", "due", "soon", "who has", "who is", "workload", "deadline", "assigned", "overdue", "open item"])
+    if is_task_query:
         active_tasks = [t for t, _ in task_rows if t.status != "DONE"]
-        related = [t.id for t in active_tasks]
+        pending_staging = [s for s, _ in staging_rows if s.state in ("READY_TO_APPROVE", "NEEDS_CLARIFICATION")]
+
+        lines = ["Current team commitments and upcoming deadlines across recorded meetings:"]
+        citations = []
+
+        if active_tasks:
+            by_owner: dict[str, list[ExecutionTask]] = {}
+            for t, _ in task_rows:
+                spk = extract_citation_speaker(t.owner)
+                by_owner.setdefault(spk, []).append(t)
+
+            for owner, otasks in by_owner.items():
+                task_summaries = []
+                for t in otasks:
+                    dl = f"due {t.deadline_iso}" if t.deadline_iso else "no deadline"
+                    task_summaries.append(f"'{t.title}' ({dl}, status: {t.status})")
+                lines.append(f"• {owner}: {', '.join(task_summaries)}.")
+
+            for t, m in task_rows[:3]:
+                if t.title:
+                    citations.append(MemoryCitation(
+                        meeting_title=m.title,
+                        meeting_date=m.meeting_date,
+                        speaker=extract_citation_speaker(t.owner),
+                        quote=f"{t.owner or 'Team'} committed to: {t.title}.",
+                    ))
+
+        if pending_staging:
+            lines.append(f"• Pending Staging: {len(pending_staging)} item(s) awaiting review in the Human-in-the-Loop queue.")
+            for s, m in staging_rows[:2]:
+                if s.verbatim_quote:
+                    citations.append(MemoryCitation(
+                        meeting_title=m.title,
+                        meeting_date=m.meeting_date,
+                        speaker=extract_citation_speaker(None, s.verbatim_quote),
+                        quote=s.verbatim_quote,
+                    ))
+
+        if not active_tasks and not pending_staging:
+            lines.append("No active or pending tasks recorded in memory.")
+
         return MemoryAskResponse(
-            answer=(
-                "Current team commitments and upcoming deadlines across meetings:\n"
-                "• Priya (Frontend Lead): User dashboard frontend (due Nov 26 / <48h window) and static UI layouts (due Nov 23).\n"
-                "• Marcus (Backend Lead): Database schema migrations (originally due Nov 18, flagged as overdue in TODO by the Watchdog) and user management REST API (due Nov 22).\n"
-                "• Tom (QA Lead): End-to-end test suite setup (due Nov 25).\n"
-                "• David (CTO): Automated CI/CD pipeline setup via GitHub Actions (due Nov 24).\n"
-                "• Unassigned: CI/CD ownership and Datadog performance monitoring are pending in the Human-in-the-Loop staging queue."
-            ),
-            citations=[
-                MemoryCitation(
-                    meeting_title="Sprint 14 Kickoff - Nov 14",
-                    meeting_date="2024-11-14",
-                    speaker="Priya (Frontend Lead)",
-                    quote="If I get the APIs on the 22nd, I can have the dashboard ready by November 26th, which gives us 3 days before launch on the 29th for QA.",
-                ),
-                MemoryCitation(
-                    meeting_title="Sprint 14 Kickoff - Nov 14",
-                    meeting_date="2024-11-14",
-                    speaker="Marcus (Backend Lead)",
-                    quote="The API work I can do, but I'll need the schema to be done first obviously. I'd say give me until November 22nd for the first version of the user API.",
-                ),
-                MemoryCitation(
-                    meeting_title="Sprint 14 Kickoff - Nov 14",
-                    meeting_date="2024-11-14",
-                    speaker="Tom (QA Lead)",
-                    quote="Okay then I'll have the E2E test suite ready by November 25th. I own that.",
-                ),
-                MemoryCitation(
-                    meeting_title="Architecture & Scope Sync - Nov 21",
-                    meeting_date="2024-11-21",
-                    speaker="David (CTO)",
-                    quote="I'll personally set up the CI/CD pipeline using GitHub Actions. I commit to having a basic pipeline with build, test, and deploy stages ready by November 24th.",
-                ),
-            ],
-            related_task_ids=related,
+            answer="\n".join(lines),
+            citations=citations[:4],
+            related_task_ids=[t.id for t in active_tasks],
         )
 
-    # 3. Superseded Decisions / Conflicts / Overrides query ("What decisions were superseded?", etc.)
-    if any(k in q_lower for k in ["superseded", "supersede", "conflict", "override", "contradict", "reversal", "what decisions", "decisions"]):
-        related = [t.id for t, _ in task_rows]
-        return MemoryAskResponse(
-            answer=(
-                "Two major decisions were superseded or contested across meetings:\n"
-                "1. Database Choice: Decision #1 (PostgreSQL chosen for billing ACID compliance) was superseded by CTO David in Meeting 2 in favor of MongoDB for document analytics.\n"
-                "2. Product Launch Date: The November 29th launch commitment by PM Sarah was overridden in Meeting 2, moving the launch forward to November 22nd with zero scope cut, causing an active schedule conflict.\n"
-                "3. Sprint Ceremonies: Daily standups at 9 AM and sprint review on Nov 28 remain active as agreed by PM Sarah."
-            ),
-            citations=[
-                MemoryCitation(
-                    meeting_title="Sprint 14 Kickoff - Nov 14",
-                    meeting_date="2024-11-14",
-                    speaker="David (CTO)",
-                    quote="I'm confident we should go with PostgreSQL as our primary database. It gives us the ACID compliance we need for the billing module, and the team has existing expertise. I'm making this call today.",
-                ),
-                MemoryCitation(
-                    meeting_title="Architecture & Scope Sync - Nov 21",
-                    meeting_date="2024-11-21",
-                    speaker="David (CTO)",
-                    quote="I've been doing more research this week and I think we need to switch our database from PostgreSQL to MongoDB. I'm making the call: we're switching to MongoDB.",
-                ),
-                MemoryCitation(
-                    meeting_title="Sprint 14 Kickoff - Nov 14",
-                    meeting_date="2024-11-14",
-                    speaker="Sarah (PM)",
-                    quote="We have a lot to cover today before the launch on November 29th.",
-                ),
-                MemoryCitation(
-                    meeting_title="Architecture & Scope Sync - Nov 21",
-                    meeting_date="2024-11-21",
-                    speaker="Sarah (PM)",
-                    quote="The launch date is now November 22nd. No scope is being cut — the full feature set needs to ship. I'm making this call as PM, the launch moves to November 22nd.",
-                ),
-            ],
-            related_task_ids=related,
-        )
+    # Category 4: General Catch-All
+    titles_str = ", ".join(f"'{m.title}'" for m in meetings)
+    active_decs = [(d, m) for d, m in dec_rows if d.status == "ACTIVE"]
+    superseded_decs = [(d, m) for d, m in dec_rows if d.status == "SUPERSEDED" or d.superseded_by_id]
+    active_tasks = [t for t, _ in task_rows if t.status != "DONE"]
 
-    # 4. Launch date query
-    if any(k in q_lower for k in ["launch", "ship", "release", "november 22", "november 29", "timeline"]):
-        related = [t.id for t, _ in task_rows if any(w in t.title.lower() for w in ["api", "dashboard", "test", "layout"])]
-        return MemoryAskResponse(
-            answer=(
-                "The product launch was originally scheduled for November 29th, 2024 by Sarah (PM) during 'Sprint 14 Kickoff'. "
-                "During 'Architecture & Scope Sync' (2024-11-21), Sarah announced that client requirements necessitated moving the launch date forward to November 22nd, 2024 with no scope reduction."
-            ),
-            citations=[
-                MemoryCitation(
-                    meeting_title="Sprint 14 Kickoff - Nov 14",
-                    meeting_date="2024-11-14",
-                    speaker="Sarah (PM)",
-                    quote="We have a lot to cover today before the launch on November 29th.",
-                ),
-                MemoryCitation(
-                    meeting_title="Architecture & Scope Sync - Nov 21",
-                    meeting_date="2024-11-21",
-                    speaker="Sarah (PM)",
-                    quote="The launch date is now November 22nd. No scope is being cut — the full feature set needs to ship. I'm making this call as PM, the launch moves to November 22nd.",
-                ),
-            ],
-            related_task_ids=related,
-        )
+    summary_lines = [
+        f"Summary of organizational memory across {len(meetings)} recorded meeting(s) ({titles_str}):",
+    ]
+    if active_decs:
+        decs_str = "; ".join(f"'{d.statement}' (decided by {extract_citation_speaker(d.decided_by, d.verbatim_quote)})" for d, _ in active_decs[:2])
+        summary_lines.append(f"• Active Decisions: {decs_str}.")
+    if superseded_decs:
+        summary_lines.append(f"• Superseded Decisions: {len(superseded_decs)} previous decision(s) superseded or contested.")
+    if active_tasks:
+        owners = list(dict.fromkeys(extract_citation_speaker(t.owner) for t in active_tasks if t.owner))
+        summary_lines.append(f"• Execution Tasks: {len(active_tasks)} active task(s) owned by {', '.join(owners) if owners else 'the team'}.")
+    if staging_rows:
+        summary_lines.append(f"• Staging Items: {len(staging_rows)} item(s) in the Human-in-the-Loop review queue.")
 
-    # 5. CI/CD Pipeline query
-    if any(k in q_lower for k in ["ci/cd", "cicd", "pipeline", "devops", "github actions"]):
-        related = [t.id for t, _ in task_rows if "ci/cd" in t.title.lower()]
-        return MemoryAskResponse(
-            answer=(
-                "In 'Sprint 14 Kickoff', CI/CD pipeline ownership was left unassigned as an open clarification item. "
-                "In 'Architecture & Scope Sync' (2024-11-21), David (CTO) personally committed to setting up the CI/CD pipeline using GitHub Actions with build, test, and deploy stages due November 24th."
-            ),
-            citations=[
-                MemoryCitation(
-                    meeting_title="Sprint 14 Kickoff - Nov 14",
-                    meeting_date="2024-11-14",
-                    speaker="David (CTO)",
-                    quote="Who's taking CI/CD setup? David (CTO): That should be... hmm. We should figure this out. Someone from the DevOps side.",
-                ),
-                MemoryCitation(
-                    meeting_title="Architecture & Scope Sync - Nov 21",
-                    meeting_date="2024-11-21",
-                    speaker="David (CTO)",
-                    quote="I'll personally set up the CI/CD pipeline using GitHub Actions. I commit to having a basic pipeline with build, test, and deploy stages ready by November 24th.",
-                ),
-            ],
-            related_task_ids=related,
-        )
+    citations = []
+    if dec_rows:
+        d0, m0 = dec_rows[0]
+        citations.append(MemoryCitation(
+            meeting_title=m0.title,
+            meeting_date=m0.meeting_date,
+            speaker=extract_citation_speaker(d0.decided_by, d0.verbatim_quote),
+            quote=d0.verbatim_quote or d0.statement,
+        ))
+    if len(dec_rows) > 1:
+        d1, m1 = dec_rows[-1]
+        citations.append(MemoryCitation(
+            meeting_title=m1.title,
+            meeting_date=m1.meeting_date,
+            speaker=extract_citation_speaker(d1.decided_by, d1.verbatim_quote),
+            quote=d1.verbatim_quote or d1.statement,
+        ))
+    elif staging_rows:
+        s0, sm0 = staging_rows[0]
+        citations.append(MemoryCitation(
+            meeting_title=sm0.title,
+            meeting_date=sm0.meeting_date,
+            speaker=extract_citation_speaker(None, s0.verbatim_quote),
+            quote=s0.verbatim_quote or "Pending item in review",
+        ))
 
-    # 6. Sprint ceremonies query
-    if any(k in q_lower for k in ["ceremonies", "standup", "review", "retrospective"]):
-        return MemoryAskResponse(
-            answer="Sprint 14 ceremonies were locked in by Sarah (PM): daily standups at 9 AM, sprint review on November 28th at 2 PM, and retrospective immediately after.",
-            citations=[
-                MemoryCitation(
-                    meeting_title="Sprint 14 Kickoff - Nov 14",
-                    meeting_date="2024-11-14",
-                    speaker="Sarah (PM)",
-                    quote="We're doing daily standups at 9 AM, sprint review on November 28th at 2 PM, and retrospective immediately after. That's locked in by me as PM.",
-                )
-            ],
-            related_task_ids=[],
-        )
-
-    # 7. Marcus's ownership query
-    if "marcus" in q_lower:
-        marcus_tasks = [t for t, _ in task_rows if t.owner and "marcus" in t.owner.lower()]
-        return MemoryAskResponse(
-            answer=(
-                "Marcus owns the database schema migrations (originally PostgreSQL due Nov 18, then reassessed for MongoDB due Nov 25) "
-                "and the REST API endpoints for user management."
-            ),
-            citations=[
-                MemoryCitation(
-                    meeting_title="Sprint 14 Kickoff - Nov 14",
-                    meeting_date="2024-11-14",
-                    speaker="Marcus (Backend Lead)",
-                    quote="The API work I can do, but I'll need the schema to be done first obviously. I'd say give me until November 22nd for the first version of the user API.",
-                )
-            ],
-            related_task_ids=[t.id for t in marcus_tasks],
-        )
-
-    # 8. Priya's ownership query
-    if "priya" in q_lower:
-        priya_tasks = [t for t, _ in task_rows if t.owner and "priya" in t.owner.lower()]
-        return MemoryAskResponse(
-            answer="Priya owns the user dashboard frontend (due November 26th, dependent on user management API) and the static UI layouts (due November 23rd).",
-            citations=[
-                MemoryCitation(
-                    meeting_title="Sprint 14 Kickoff - Nov 14",
-                    meeting_date="2024-11-14",
-                    speaker="Priya (Frontend Lead)",
-                    quote="If I get the APIs on the 22nd, I can have the dashboard ready by November 26th, which gives us 3 days before launch on the 29th for QA.",
-                )
-            ],
-            related_task_ids=[t.id for t in priya_tasks],
-        )
-
-    # 9. Tom's ownership query
-    if "tom" in q_lower:
-        tom_tasks = [t for t, _ in task_rows if t.owner and "tom" in t.owner.lower()]
-        return MemoryAskResponse(
-            answer="Tom owns the end-to-end test suite setup, which was originally due November 25th before the launch date shift.",
-            citations=[
-                MemoryCitation(
-                    meeting_title="Sprint 14 Kickoff - Nov 14",
-                    meeting_date="2024-11-14",
-                    speaker="Tom (QA Lead)",
-                    quote="Okay then I'll have the E2E test suite ready by November 25th. I own that.",
-                )
-            ],
-            related_task_ids=[t.id for t in tom_tasks],
-        )
-
-    # 10. General Catch-All (when meetings exist in DB)
-    if len(meetings) > 0:
-        titles_str = ", ".join(f"'{m.title}'" for m in meetings)
-        return MemoryAskResponse(
-            answer=(
-                f"Summary of recorded organizational memory across {len(meetings)} meeting(s) ({titles_str}):\n"
-                "• Key Decisions: PostgreSQL was chosen in Sprint 14 Kickoff and subsequently contested for MongoDB in Tech Sync; the product launch date moved from Nov 29 to Nov 22.\n"
-                "• Active Tasks: Marcus owns backend APIs and schema; Priya owns the user dashboard; Tom owns the E2E test suite; David owns the CI/CD pipeline.\n"
-                "• Staged Items: Pending items are held in the Human-in-the-Loop queue awaiting review."
-            ),
-            citations=[
-                MemoryCitation(
-                    meeting_title=meetings[0].title,
-                    meeting_date=meetings[0].meeting_date,
-                    speaker="David (CTO)",
-                    quote="I'm confident we should go with PostgreSQL as our primary database. It gives us the ACID compliance we need for the billing module, and the team has existing expertise. I'm making this call today.",
-                ),
-                MemoryCitation(
-                    meeting_title=meetings[-1].title,
-                    meeting_date=meetings[-1].meeting_date,
-                    speaker="Sarah (PM)",
-                    quote="The launch date is now November 22nd. No scope is being cut — the full feature set needs to ship. I'm making this call as PM, the launch moves to November 22nd.",
-                ),
-            ],
-            related_task_ids=[t.id for t, _ in task_rows],
-        )
-
-    # Default if truly 0 meetings in database
     return MemoryAskResponse(
-        answer="Not found in recorded meeting memory.",
-        citations=[],
-        related_task_ids=[],
+        answer="\n".join(summary_lines),
+        citations=citations[:4],
+        related_task_ids=[t.id for t in active_tasks],
     )

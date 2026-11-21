@@ -292,6 +292,13 @@ export function BoardTab({ state, actions }) {
         onSendSingle={actions.sendTaskReminderAction}
       />
 
+      {state.tasks.length === 0 && (
+        <div className="ws-empty" style={{ margin: '0 0 20px', padding: '24px 16px' }}>
+          <div className="ws-empty-icon">📋</div>
+          <div className="ws-empty-text">No commitments yet — ingest a meeting transcript to populate owners</div>
+        </div>
+      )}
+
       {/* 3-Column Kanban Board */}
       <div className="ws-kanban">
         <KanbanColumn
